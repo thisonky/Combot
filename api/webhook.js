@@ -626,12 +626,3 @@ async function handleCallback(query, env, api) {
 }
 
 // ── tgRaw helper ───────────────────────────────
-
-async function tgRaw(token, method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
-}
