@@ -69,9 +69,12 @@ export async function acDelSession(env, uid)    { return del(env, `session:${uid
 
 export async function acSetSession(env, u1, u2) {
   const now = Date.now();
+  const val1 = JSON.stringify({ partnerId: u2, startedAt: now });
+  const val2 = JSON.stringify({ partnerId: u1, startedAt: now });
+  // TTL 24 jam — cukup panjang untuk sesi chat
   await redisPipe(r(env).url, r(env).token, [
-    ["SET", `session:${u1}`, JSON.stringify({ partnerId: u2, startedAt: now })],
-    ["SET", `session:${u2}`, JSON.stringify({ partnerId: u1, startedAt: now })],
+    ["SET", `session:${u1}`, val1, "EX", 86400],
+    ["SET", `session:${u2}`, val2, "EX", 86400],
   ]);
 }
 

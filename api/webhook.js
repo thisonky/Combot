@@ -127,6 +127,21 @@ async function handleMessage(msg, env, api) {
   const chatId = msg.chat.id;
   const text   = msg.text || msg.caption || "";
 
+  // ── Cek status anon chat PERTAMA ────────────
+  // Harus dicek sebelum semua handler lain agar pesan
+  // tidak salah diproses saat user sedang chatting
+  const acUser = await acGetUser(env, uid);
+
+  // Jika sedang chatting, relay LANGSUNG — tidak proses command lain
+  // kecuali /next, /stop, /start, /find
+  if (acUser?.status === "chatting") {
+    const isSystemCmd = text.startsWith("/stop") || text.startsWith("/next") ||
+                        text.startsWith("/start") || text.startsWith("/find");
+    if (!isSystemCmd) {
+      return handleAnonRelay(msg, uid, chatId, acUser, env, api);
+    }
+  }
+
   // ── /start ──────────────────────────────────
   if (text.startsWith("/start")) {
     await dbRegisterUser(env, uidNum);
@@ -243,16 +258,8 @@ async function handleMessage(msg, env, api) {
     return handleMenfessTrigger(msg, uid, uidNum, chatId, text, env, api);
   }
 
-  // ── Anonymous Chat relay ─────────────────────
-  // Jika user sedang chatting, teruskan pesan ke partner
-  const acUser = await acGetUser(env, uid);
-  if (acUser?.status === "chatting") {
-    return handleAnonRelay(msg, uid, chatId, acUser, env, api);
-  }
-
-  // Default — user tidak dalam sesi, tidak ada command yang match
-  if (acUser && acUser.status === "idle") {
-    // Hanya kasih hint kalau user sudah register
+  // Default — tidak ada command yang match
+  if (acUser) {
     return api.send({
       chat_id: chatId,
       text: "Gunakan tombol di bawah untuk memilih fitur, atau ketik `mfs!` untuk kirim menfess.",
@@ -374,34 +381,48 @@ async function handleAnonStop(uid, chatId, env, api) {
 async function handleAnonRelay(msg, uid, chatId, acUser, env, api) {
   const session = await acGetSession(env, uid);
   if (!session) {
+    // Session hilang — reset status user agar tidak stuck
     await acSetUser(env, uid, { ...acUser, status: "idle" });
-    return api.send({ chat_id: chatId, text: "⚠️ Sesi tidak ditemukan. Ketik /find untuk mulai lagi." });
+    return api.send({
+      chat_id: chatId,
+      text: "⚠️ Sesi telah berakhir. Ketik /find untuk mencari partner baru.",
+      reply_markup: mainMenuKbd(Number(uid) === env.ADMIN_ID),
+    });
   }
 
   const pid = Number(session.partnerId);
+
+  async function tgRaw(method, body) {
+    return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(r => r.json());
+  }
 
   try {
     if (msg.text) {
       await api.send({ chat_id: pid, text: `💬 ${msg.text}` });
     } else if (msg.photo) {
-      await api.sendPhoto({ chat_id: pid, photo: msg.photo[msg.photo.length - 1].file_id, caption: msg.caption ? `💬 ${msg.caption}` : undefined });
+      await api.sendPhoto({ chat_id: pid, photo: msg.photo[msg.photo.length - 1].file_id, ...(msg.caption ? { caption: `💬 ${msg.caption}` } : {}) });
     } else if (msg.video) {
-      await api.sendVideo({ chat_id: pid, video: msg.video.file_id, caption: msg.caption ? `💬 ${msg.caption}` : undefined });
+      await api.sendVideo({ chat_id: pid, video: msg.video.file_id, ...(msg.caption ? { caption: `💬 ${msg.caption}` } : {}) });
     } else if (msg.voice) {
       await api.sendVoice({ chat_id: pid, voice: msg.voice.file_id });
     } else if (msg.sticker) {
       await api.sendSticker({ chat_id: pid, sticker: msg.sticker.file_id });
     } else if (msg.video_note) {
-      await tg(env.BOT_TOKEN).call("sendVideoNote", { chat_id: pid, video_note: msg.video_note.file_id });
+      await tgRaw("sendVideoNote", { chat_id: pid, video_note: msg.video_note.file_id });
     } else if (msg.audio) {
-      await tg(env.BOT_TOKEN).call("sendAudio", { chat_id: pid, audio: msg.audio.file_id });
+      await tgRaw("sendAudio", { chat_id: pid, audio: msg.audio.file_id });
     } else if (msg.document) {
-      await tg(env.BOT_TOKEN).call("sendDocument", { chat_id: pid, document: msg.document.file_id });
+      await tgRaw("sendDocument", { chat_id: pid, document: msg.document.file_id });
     } else {
       await api.send({ chat_id: chatId, text: "⚠️ Tipe media ini belum didukung." });
     }
   } catch (e) {
     console.error("relay error:", e.message);
+    await api.send({ chat_id: chatId, text: "⚠️ Gagal mengirim pesan ke partner." });
   }
 }
 
