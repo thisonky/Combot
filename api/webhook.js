@@ -122,41 +122,93 @@ async function handleMessage(msg, env, api) {
   const uidNum = Number(userId);
   const chatId = msg.chat.id;
   const text   = (msg.text || msg.caption || "").trim();
+  const textLow = text.toLowerCase(); // untuk perbandingan case-insensitive
 
   // ── PRIORITAS 1: cek status anon chat dulu ──
-  // Jika sedang chatting, relay SEMUA pesan kecuali system commands
   const acUser = await acGetUser(env, userId);
 
   if (acUser?.status === "chatting") {
-    const isSysCmd = text === "/stop" || text === "/next" ||
-                     text.startsWith("/stop ") || text.startsWith("/next ");
+    const isSysCmd = textLow === "/stop" || textLow === "/next" ||
+                     textLow.startsWith("/stop ") || textLow.startsWith("/next ");
     if (!isSysCmd) {
       return handleRelay(msg, userId, chatId, acUser, env, api);
     }
   }
 
-  // ── PRIORITAS 2: commands ───────────────────
+  // ── PRIORITAS 2: slash commands ────────────
 
-  if (text.startsWith("/start")) return handleStart(msg, userId, uidNum, chatId, text, env, api);
-  if (text === "/find" || text.startsWith("/find "))  return handleFind(userId, chatId, env, api, false);
-  if (text === "/next" || text.startsWith("/next "))  return handleNext(userId, chatId, env, api);
-  if (text === "/stop" || text.startsWith("/stop "))  return handleStop(userId, chatId, env, api);
-  if (text === "/referral") return handleReferral(uidNum, chatId, env, api);
+  if (textLow.startsWith("/start")) return handleStart(msg, userId, uidNum, chatId, text, env, api);
+  if (textLow === "/find" || textLow.startsWith("/find "))  return handleFind(userId, chatId, env, api, false);
+  if (textLow === "/next" || textLow.startsWith("/next "))  return handleNext(userId, chatId, env, api);
+  if (textLow === "/stop" || textLow.startsWith("/stop "))  return handleStop(userId, chatId, env, api);
+  if (textLow === "/referral") return handleReferral(uidNum, chatId, env, api);
 
   // ── PRIORITAS 3: keyboard buttons ──────────
 
   if (text === "💌 Kirim Menfess") {
-    return api.send({ chat_id: chatId, text: `💌 *Mode Menfess*\n\nKetik \`mfs!\` diikuti isi pesanmu.\n\n*Contoh:* \`mfs! Hai semuanya 😳\`\n\nMendukung teks, foto, video, dan voice note.\n📊 Batas: *${env.DAILY_MAX} menfess per hari*` });
+    return api.send({
+      chat_id: chatId,
+      text:
+        "💌 *Kirim Menfess*\n\n" +
+        "Menfess adalah pesan anonim yang akan dikirim ke channel tanpa identitasmu.\n\n" +
+        "📝 *Cara kirim:*\n" +
+        "Ketik `mfs!` diikuti isi pesanmu, lalu kirim.\n\n" +
+        "✏️ *Contoh:*\n" +
+        "`mfs! Hai semua, aku mau nembak seseorang nih 😳`\n\n" +
+        "📎 *Media yang bisa dikirim:*\n" +
+        "• Teks biasa\n" +
+        "• Foto 🖼️ (tampil sebagai spoiler)\n" +
+        "• Video 🎥 (tampil sebagai spoiler)\n" +
+        "• Voice note 🎙️\n\n" +
+        `📊 Kuota kamu: *${env.DAILY_MAX} menfess per hari*\n` +
+        "Kuota bisa bertambah lewat referral! 🎁",
+    });
   }
+
   if (text === "🔍 Cari Chat Anonim") return handleFind(userId, chatId, env, api, false);
+
   if (text === "📊 Sisa Limit Menfess") {
     const used  = await dbGetDailyCount(env, uidNum);
     const bonus = await dbGetReferralBonus(env, uidNum);
+    const sisa  = env.DAILY_MAX - used + bonus;
     const rl    = refLink(env, uidNum);
-    return api.send({ chat_id: chatId, text: `📊 *Sisa Limit Menfess Hari Ini*\n\nKuota harian: *${env.DAILY_MAX - used}/${env.DAILY_MAX}* slot\nBonus referral: *${bonus}* slot\n━━━━━━━━━━━━━━━\nTotal sisa: *${env.DAILY_MAX - used + bonus}* slot`, reply_markup: ikbd([[burl("🔗 Bagikan Referral & Dapat Bonus Kuota", shareUrl(refLink(env, uidNum)))]]) });
+    return api.send({
+      chat_id: chatId,
+      text:
+        "📊 *Sisa Limit Menfessmu Hari Ini*\n\n" +
+        `🗓️ Kuota harian: *${env.DAILY_MAX - used}* dari *${env.DAILY_MAX}* slot\n` +
+        `🎁 Bonus referral: *${bonus}* slot\n` +
+        "━━━━━━━━━━━━━━━━━\n" +
+        `✨ Total sisa: *${sisa} slot*\n\n` +
+        (sisa <= 0
+          ? "😴 Kuotamu habis hari ini. Kembali lagi besok ya!\nAtau ajak teman untuk dapat bonus kuota gratis 👇"
+          : `Kamu masih bisa kirim *${sisa} menfess* lagi hari ini!\nMau nambah kuota? Ajak teman lewat referral 👇`),
+      reply_markup: ikbd([[burl("🔗 Bagikan & Dapat Bonus Kuota", shareUrl(rl))]]),
+    });
   }
+
   if (text === "ℹ️ Bantuan") {
-    return api.send({ chat_id: chatId, text: `📖 *Panduan Combo Bot*\n\n━━━ 💌 *MENFESS* ━━━\nKetik \`mfs!\` + pesan untuk kirim anonim ke channel.\nBatas: *${env.DAILY_MAX} menfess/hari*\n\n━━━ 🔍 *ANONYMOUS CHAT* ━━━\n/find — Cari partner chat\n/next — Ganti partner\n/stop — Keluar sesi\n\nSaat chat anonim, semua pesanmu diteruskan otomatis.\n\n━━━ 🎁 *REFERRAL* ━━━\n/referral — Dapatkan link referralmu\nAjak teman → dapat bonus kuota menfess!` });
+    return api.send({
+      chat_id: chatId,
+      text:
+        "📖 *Panduan Lengkap Combo Bot*\n\n" +
+        "━━━ 💌 *MENFESS* ━━━\n" +
+        "Kirim pesan anonim ke channel tanpa ketahuan siapa kamu!\n\n" +
+        "• Ketik `mfs!` + pesanmu lalu kirim\n" +
+        "• Bot akan tampilkan preview sebelum dikirim\n" +
+        "• Kamu bisa pilih kirim biasa atau auto-hapus\n" +
+        `• Batas: *${env.DAILY_MAX} menfess per hari*\n\n` +
+        "━━━ 🔍 *ANONYMOUS CHAT* ━━━\n" +
+        "Ngobrol 1-on-1 dengan orang asing secara anonim!\n\n" +
+        "• /find — Mulai cari partner ngobrol\n" +
+        "• /next — Ganti ke partner lain\n" +
+        "• /stop — Keluar dari sesi chat\n\n" +
+        "_Saat chat anonim aktif, semua pesanmu otomatis diteruskan ke partner._\n\n" +
+        "━━━ 🎁 *REFERRAL* ━━━\n" +
+        "Ajak teman dan dapat bonus kuota menfess gratis!\n\n" +
+        "• /referral — Lihat link & statistik referralmu\n" +
+        `• Setiap teman yang join: kamu & dia dapat *+${env.REF_BONUS} bonus kuota*`,
+    });
   }
 
   // ── PRIORITAS 4: admin ──────────────────────
@@ -165,16 +217,23 @@ async function handleMessage(msg, env, api) {
   if (text === "🧾 Command Admin" && uidNum === env.ADMIN_ID) return handleAdminHelp(chatId, api);
   if (text.startsWith(".") && uidNum === env.ADMIN_ID) return handleAdminCmd(text, chatId, env, api);
 
-  // ── PRIORITAS 5: menfess trigger ───────────
+  // ── PRIORITAS 5: menfess trigger (case-insensitive) ─
 
-  if (text.startsWith("mfs!") || (msg.caption || "").startsWith("mfs!")) {
+  const rawText    = msg.text || "";
+  const rawCaption = msg.caption || "";
+  const isMenfess  = rawText.toLowerCase().startsWith("mfs!") ||
+                     rawCaption.toLowerCase().startsWith("mfs!");
+  if (isMenfess) {
     return handleMenfess(msg, userId, uidNum, chatId, env, api);
   }
 
   // ── Default ─────────────────────────────────
 
   if (acUser?.status === "searching") {
-    return api.send({ chat_id: chatId, text: "🔍 Sedang mencari partner...\n/stop — Batalkan pencarian" });
+    return api.send({
+      chat_id: chatId,
+      text: "🔍 Lagi nyari partner buat ngobrol nih...\n\nMau batalkan pencarian? Ketik /stop",
+    });
   }
 }
 
@@ -205,18 +264,22 @@ async function handleStart(msg, userId, uidNum, chatId, text, env, api) {
     return api.send({
       chat_id: chatId,
       text:
-        "👋 *Selamat datang di Combo Bot!*\n\n" +
-        "Bot ini punya 2 fitur utama:\n\n" +
-        "💌 *Menfess* — Kirim pesan anonim ke channel\n" +
-        "🔍 *Anonymous Chat* — Ngobrol 1-on-1 secara anonim\n\n" +
-        "Sebelum mulai, pilih gendermu:",
+        "👋 *Halo! Selamat datang di Combo Bot!* 🎉\n\n" +
+        "Bot ini hadir dengan 2 fitur seru buat kamu yang suka jaga privasi:\n\n" +
+        "💌 *Menfess* — Kirim pesan anonim ke channel, tanpa ada yang tahu kamu siapa!\n\n" +
+        "🔍 *Anonymous Chat* — Ngobrol bebas 1-on-1 dengan orang asing secara anonim. Asik buat kenalan!\n\n" +
+        "Sebelum mulai, boleh tau kamu gender apa? 😊",
       reply_markup: ikbd([[btn("👨 Laki-laki", "gender_male"), btn("👩 Perempuan", "gender_female")]]),
     });
   }
 
   return api.send({
     chat_id: chatId,
-    text: "👋 *Selamat datang kembali!*\n\nPilih fitur di bawah:",
+    text:
+      "👋 *Halo, selamat datang kembali!* 😊\n\n" +
+      "Mau ngapain hari ini?\n" +
+      "💌 Kirim menfess atau 🔍 nyari teman ngobrol anonim?\n\n" +
+      "Pilih dari tombol di bawah ya!",
     reply_markup: mainMenuKbd(uidNum === env.ADMIN_ID),
   });
 }
@@ -232,10 +295,10 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
   }
   if (!fromInternal) {
     if (user.status === "chatting") {
-      return api.send({ chat_id: chatId, text: "💬 Kamu sedang dalam sesi chat.\nGunakan /next untuk ganti partner atau /stop untuk keluar." });
+      return api.send({ chat_id: chatId, text: "💬 Kamu lagi ngobrol sama seseorang nih!\n\nKalau mau ganti partner, ketik /next.\nKalau mau keluar dari sesi, ketik /stop." });
     }
     if (user.status === "searching") {
-      return api.send({ chat_id: chatId, text: "🔍 Kamu sudah dalam antrian pencarian. Tunggu sebentar..." });
+      return api.send({ chat_id: chatId, text: "🔍 Kamu udah masuk antrian pencarian kok!\nSabar ya, lagi nyariin partner buat kamu 😄\n\nMau batal? Ketik /stop" });
     }
   }
 
@@ -247,12 +310,12 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
     return api.send({
       chat_id: chatId,
       text:
-        "🔍 *Mencari partner...*\n\n" +
-        "😴 Belum ada user lain yang tersedia.\n" +
-        "Kamu akan otomatis dicocokkan saat ada yang mencari.\n\n" +
-        "Sambil menunggu, kamu bisa kirim menfess:\n" +
-        "Ketik `mfs!` + pesan\n\n" +
-        "/stop — Batalkan pencarian",
+        "🔍 *Lagi nyariin partner buat kamu...*\n\n" +
+        "😴 Kayaknya belum ada yang online sekarang.\n" +
+        "Tenang, kamu bakal otomatis dicocokkan begitu ada yang nyari juga!\n\n" +
+        "Sambil nunggu, kamu bisa kirim menfess dulu:\n" +
+        "Ketik `mfs!` + pesanmu 💌\n\n" +
+        "Mau batalkan pencarian? Ketik /stop",
     });
   }
 
@@ -266,11 +329,12 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
   await acSetSession(env, userId, partnerId);
 
   const connMsg =
-    "🎉 *Partner ditemukan!*\n\n" +
-    "Kamu terhubung secara anonim. Mulai ngobrol!\n" +
-    "Kirim teks, foto, video, stiker, atau voice note.\n\n" +
-    "⏭ /next — Ganti partner\n" +
-    "🛑 /stop — Keluar sesi";
+    "🎉 *Yeay, partner ditemukan!*\n\n" +
+    "Kamu sekarang terhubung secara anonim.\n" +
+    "Yuk mulai ngobrol! Identitasmu tetap rahasia 🤫\n\n" +
+    "Bisa kirim teks, foto, video, stiker, atau voice note.\n\n" +
+    "⏭ /next — Ganti ke partner lain\n" +
+    "🛑 /stop — Keluar dari sesi chat";
 
   await api.send({ chat_id: chatId,          text: connMsg });
   await api.send({ chat_id: Number(partnerId), text: connMsg });
@@ -290,7 +354,7 @@ async function handleNext(userId, chatId, env, api) {
   if (session) {
     const pid    = session.partnerId;
     const pData  = await acGetUser(env, pid);
-    await api.send({ chat_id: Number(pid), text: "👋 Partner kamu pergi. Ketik /find untuk mencari partner baru." });
+    await api.send({ chat_id: Number(pid), text: "👋 Partner kamu cabut nih. Dia lagi nyari partner baru.\n\nKamu juga mau cari partner baru? Ketik /find 😊" });
     if (pData) await acSetUser(env, pid, { ...pData, status: "idle" });
     await acDelSession(env, pid);
     await acDelSession(env, userId);
@@ -315,7 +379,7 @@ async function handleStop(userId, chatId, env, api) {
   if (session) {
     const pid   = session.partnerId;
     const pData = await acGetUser(env, pid);
-    await api.send({ chat_id: Number(pid), text: "👋 Partner kamu mengakhiri sesi.\nKetik /find untuk mencari partner baru." });
+    await api.send({ chat_id: Number(pid), text: "👋 Partner kamu memutuskan untuk keluar dari sesi.\n\nTenang, mungkin next time ketemu yang lebih seru!\nMau cari partner baru? Ketik /find 😊" });
     if (pData) await acSetUser(env, pid, { ...pData, status: "idle" });
     await acDelSession(env, pid);
     await acDelSession(env, userId);
@@ -324,7 +388,10 @@ async function handleStop(userId, chatId, env, api) {
   await acSetUser(env, userId, { ...user, status: "idle" });
   return api.send({
     chat_id: chatId,
-    text: "🛑 Sesi dihentikan.\nGunakan /find atau klik tombol untuk mencari partner baru.",
+    text:
+      "🛑 *Sesi chat diakhiri.*\n\n" +
+      "Makasih udah ngobrol ya! Semoga menyenangkan 😊\n\n" +
+      "Mau cari partner baru? Klik tombol di bawah atau ketik /find",
     reply_markup: mainMenuKbd(Number(userId) === env.ADMIN_ID),
   });
 }
@@ -400,24 +467,33 @@ async function handleReferral(uidNum, chatId, env, api) {
 async function handleMenfess(msg, userId, uidNum, chatId, env, api) {
   await dbRegisterUser(env, uidNum);
   const senderName = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
-  const text = msg.text || msg.caption || "";
+  const rawText = msg.text || msg.caption || "";
 
   const blockInfo = await dbIsBlocked(env, uidNum);
-  if (blockInfo) return api.send({ chat_id: chatId, text: `🚫 Kamu telah diblokir dari mengirim menfess.\nAlasan: *${blockInfo.reason}*\nWaktu: ${blockInfo.blocked_at}` });
+  if (blockInfo) return api.send({ chat_id: chatId, text: `🚫 *Aduuh, kamu kena blokir nih...*\n\nAlasan: _${blockInfo.reason}_\nWaktu: ${blockInfo.blocked_at}\n\nKalau merasa salah, hubungi admin ya.` });
 
   const mutedUntil = await dbIsMuted(env, uidNum);
-  if (mutedUntil) return api.send({ chat_id: chatId, text: `🔇 Kamu sedang di-mute. Bisa posting lagi setelah *${fmtDate(mutedUntil)}*.` });
+  if (mutedUntil) return api.send({ chat_id: chatId, text: `🔇 *Kamu lagi kena mute nih...*\n\nBisa kirim menfess lagi setelah:\n*${fmtDate(mutedUntil)}*\n\nSabar ya! 😊` });
 
   const remaining = await mfRemaining(env, uidNum);
   if (remaining <= 0) {
-    return api.send({ chat_id: chatId, text: `⏳ Kamu sudah mencapai batas *${env.DAILY_MAX} menfess hari ini*.\nAjak teman lewat referral untuk dapat bonus kuota! 😊`, reply_markup: ikbd([[burl("🔗 Bagikan Referral & Dapat Bonus Kuota", shareUrl(refLink(env, uidNum)))]]) });
+    return api.send({
+      chat_id: chatId,
+      text:
+        `⏳ *Waduh, kuota menfessmu habis nih!*\n\n` +
+        `Kamu sudah kirim *${env.DAILY_MAX} menfess* hari ini.\n` +
+        "Tenang, kuota bakal diisi ulang besok! 🌙\n\n" +
+        "💡 *Tips:* Ajak teman join lewat link referralmu dan dapat bonus kuota gratis! 🎁",
+      reply_markup: ikbd([[burl("🔗 Bagikan Referral & Dapat Bonus Kuota", shareUrl(refLink(env, uidNum)))]]),
+    });
   }
 
-  const cleanContent = text.replace("mfs!", "💌").trim();
-  if (!cleanContent) return api.send({ chat_id: chatId, text: "❌ Isi menfess tidak boleh kosong!" });
+  // Hapus trigger case-insensitive (mfs!, Mfs!, MFS!, dll)
+  const cleanContent = rawText.replace(/^mfs!/i, "💌").trim();
+  if (!cleanContent || cleanContent === "💌") return api.send({ chat_id: chatId, text: "❌ Isi menfessnya kosong nih!\n\nCoba ketik lagi ya, contoh:\n`mfs! Hai semuanya 😊`" });
 
   const blockedKw = await dbContainsBlacklistedKw(env, cleanContent);
-  if (blockedKw) return api.send({ chat_id: chatId, text: `❌ Menfessmu ditolak karena mengandung kata terlarang: *${blockedKw}*` });
+  if (blockedKw) return api.send({ chat_id: chatId, text: `❌ *Menfessmu tidak bisa dikirim* karena mengandung kata yang tidak diperbolehkan.\n\nCoba edit pesanmu dan kirim ulang ya! 😊` });
 
   let mediaType = "text", fileId = null;
   if (msg.photo)      { mediaType = "photo";  fileId = msg.photo[msg.photo.length - 1].file_id; }
@@ -429,11 +505,16 @@ async function handleMenfess(msg, userId, uidNum, chatId, env, api) {
   const preview = cleanContent.length > 200 ? cleanContent.slice(0, 200) + "..." : cleanContent;
   return api.send({
     chat_id: chatId,
-    text: `📝 *Preview Menfessmu:*\n\n${preview}\n\nPilih cara pengiriman:`,
+    text:
+      `📝 *Preview Menfessmu:*\n\n` +
+      `${preview}\n\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `Pastikan sudah sesuai sebelum dikirim ya!\n` +
+      `Pilih cara pengiriman:`,
     reply_markup: ikbd([
-      [btn("✅ Kirim!", "mf_confirm")],
-      [btn(`🕐 Kirim + Hapus Otomatis ${env.AUTO_DEL_MIN} Menit`, "mf_autodel")],
-      [btn("❌ Batalkan", "mf_cancel")],
+      [btn("✅ Kirim Sekarang!", "mf_confirm")],
+      [btn(`⏱️ Kirim + Auto-Hapus ${env.AUTO_DEL_MIN} Menit`, "mf_autodel")],
+      [btn("❌ Batal", "mf_cancel")],
     ]),
   });
 }
@@ -541,7 +622,10 @@ async function handleCallback(query, env, api) {
     const label = gender === "male" ? "👨 Laki-laki" : "👩 Perempuan";
     return api.send({
       chat_id: chatId,
-      text: `✅ Profil disimpan sebagai *${label}*\n\nSelamat datang! Pilih fitur di bawah:`,
+      text:
+        `✅ Oke, profil kamu disimpan sebagai *${label}* ya!\n\n` +
+        "Sekarang kamu bisa mulai eksplorasi fitur-fiturnya 🎉\n" +
+        "Pilih dari tombol di bawah:",
       reply_markup: mainMenuKbd(uidNum === env.ADMIN_ID),
     });
   }
@@ -550,14 +634,14 @@ async function handleCallback(query, env, api) {
   if (data === "mf_cancel") {
     await api.answer(query.id);
     await dbDeletePending(env, uidNum);
-    return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Pengiriman menfess dibatalkan." });
+    return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Oke, menfess dibatalkan.\n\nMau kirim yang lain? Ketik `mfs!` + pesanmu kapan saja!" });
   }
 
   // Menfess confirm
   if (data === "mf_confirm" || data === "mf_autodel") {
     await api.answer(query.id);
     const pending = await dbGetPending(env, uidNum);
-    if (!pending) return api.edit({ chat_id: chatId, message_id: msgId, text: "⚠️ Sesi habis. Silakan kirim ulang menfessmu." });
+    if (!pending) return api.edit({ chat_id: chatId, message_id: msgId, text: "⚠️ Sesinya udah habis nih. Coba ketik ulang menfessmu ya!" });
 
     const autoDelete = data === "mf_autodel";
     let sentMsg;
@@ -569,16 +653,14 @@ async function handleCallback(query, env, api) {
       if (!sentMsg?.ok) throw new Error(JSON.stringify(sentMsg));
     } catch (e) {
       console.error("Send to channel:", e.message);
-      return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Gagal kirim ke channel. Pastikan bot sudah jadi *Admin* di channel.", parse_mode: "Markdown" });
+      return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Aduh, gagal kirim ke channel nih!\n\nPastikan bot sudah jadi *Admin* di channel dengan izin posting ya.", parse_mode: "Markdown" });
     }
 
     const sentId = sentMsg.result.message_id;
 
-    // Reaction (ignore error)
     tgRaw(env.BOT_TOKEN, "setMessageReaction", { chat_id: env.CHANNEL_ID, message_id: sentId, reaction: [{ type: "emoji", emoji: "🔥" }] }).catch(() => {});
     tgRaw(env.BOT_TOKEN, "setMessageReaction", { chat_id: pending.triggerChatId, message_id: pending.triggerMsgId, reaction: [{ type: "emoji", emoji: "❤️" }] }).catch(() => {});
 
-    // Konsumsi kuota
     if ((await dbGetReferralBonus(env, uidNum)) > 0) await dbUseReferralBonus(env, uidNum);
     else await dbIncrementDaily(env, uidNum);
 
@@ -594,8 +676,15 @@ async function handleCallback(query, env, api) {
 
     await api.edit({
       chat_id: chatId, message_id: msgId,
-      text: `✅ *Menfess terkirim!*\n\n🔗 ${link}\n📊 Sisa kuota: *${rem}/${env.DAILY_MAX}*${autoNote}`,
-      reply_markup: ikbd([[btn("🗑️ Hapus Menfess", `mf_del_${sentId}`)], [burl("🔗 Bagikan Referral", shareUrl(refLink(env, uidNum)))]]),
+      text:
+        `✅ *Menfessmu berhasil terkirim!* 🎉\n\n` +
+        `🔗 Lihat di channel: ${link}\n` +
+        `📊 Sisa kuota hari ini: *${rem} slot*` +
+        autoNote,
+      reply_markup: ikbd([
+        [btn("🗑️ Hapus Menfess Ini", `mf_del_${sentId}`)],
+        [burl("🔗 Ajak Teman & Dapat Bonus Kuota", shareUrl(refLink(env, uidNum)))],
+      ]),
       link_preview_options: { is_disabled: true },
     });
 
@@ -611,12 +700,12 @@ async function handleCallback(query, env, api) {
     const delId   = Number(data.replace("mf_del_", ""));
     const menfess = await dbGetMenfess(env, delId);
     if (!menfess) return api.answer(query.id, "⚠️ Data menfess tidak ditemukan.", true);
-    if (Number(menfess.user_id) !== uidNum) return api.answer(query.id, "❌ Kamu tidak bisa menghapus menfess orang lain!", true);
+    if (Number(menfess.user_id) !== uidNum) return api.answer(query.id, "❌ Itu bukan menfessmu, jadi nggak bisa dihapus ya!", true);
     try {
       await tgRaw(env.BOT_TOKEN, "deleteMessage", { chat_id: env.CHANNEL_ID, message_id: delId });
       await dbDeleteMenfess(env, delId);
       await api.answer(query.id, "✅ Menfess berhasil dihapus!");
-      return api.edit({ chat_id: chatId, message_id: msgId, text: "✅ Menfessmu telah dihapus dari channel." });
+      return api.edit({ chat_id: chatId, message_id: msgId, text: "✅ Menfessmu sudah dihapus dari channel!\n\nMau kirim yang baru? Ketik `mfs!` + pesanmu." });
     } catch {
       return api.answer(query.id, "Gagal menghapus. Pesan mungkin sudah dihapus.", true);
     }
@@ -626,3 +715,12 @@ async function handleCallback(query, env, api) {
 }
 
 // ── tgRaw helper ───────────────────────────────
+
+async function tgRaw(token, method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
