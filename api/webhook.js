@@ -64,6 +64,7 @@ function mainMenuKbd(isAdmin) {
   const rows = [
     [{ text: "💌 Kirim Menfess" }, { text: "🔍 Cari Chat Anonim" }],
     [{ text: "📊 Sisa Limit Menfess" }, { text: "ℹ️ Bantuan" }],
+    [{ text: "🚨 Laporkan User" }, { text: "📬 Hubungi Admin" }],
   ];
   if (isAdmin) rows.push([{ text: "📊 Stats" }, { text: "🧾 Command Admin" }]);
   return { keyboard: rows, resize_keyboard: true, input_field_placeholder: "Pilih fitur atau ketik mfs!..." };
@@ -104,6 +105,11 @@ export default async function handler(req, res) {
     if (update.callback_query) {
       await handleCallback(update.callback_query, env, api);
     } else if (update.message) {
+      // Cek apakah ini pesan dari admin yang me-reply pesan user
+      if (update.message.from.id === env.ADMIN_ID && update.message.reply_to_message) {
+        await handleAdminReply(update.message, env, api);
+        // Tetap lanjut proses normal (misal admin juga pakai command)
+      }
       await handleMessage(update.message, env, api);
     }
   } catch (e) {
@@ -142,6 +148,8 @@ async function handleMessage(msg, env, api) {
   if (textLow === "/next" || textLow.startsWith("/next "))  return handleNext(userId, chatId, env, api);
   if (textLow === "/stop" || textLow.startsWith("/stop "))  return handleStop(userId, chatId, env, api);
   if (textLow === "/referral") return handleReferral(uidNum, chatId, env, api);
+  if (textLow === "/report")   return handleReportMenu(userId, uidNum, chatId, env, api);
+  if (textLow === "/contact")  return handleContactMenu(userId, uidNum, chatId, env, api);
 
   // ── PRIORITAS 3: keyboard buttons ──────────
 
@@ -187,6 +195,9 @@ async function handleMessage(msg, env, api) {
     });
   }
 
+  if (text === "🚨 Laporkan User") return handleReportMenu(userId, uidNum, chatId, env, api);
+  if (text === "📬 Hubungi Admin") return handleContactMenu(userId, uidNum, chatId, env, api);
+
   if (text === "ℹ️ Bantuan") {
     return api.send({
       chat_id: chatId,
@@ -204,6 +215,14 @@ async function handleMessage(msg, env, api) {
         "• /next — Ganti ke partner lain\n" +
         "• /stop — Keluar dari sesi chat\n\n" +
         "_Saat chat anonim aktif, semua pesanmu otomatis diteruskan ke partner._\n\n" +
+        "━━━ 🚨 *LAPORAN* ━━━\n" +
+        "Merasa terganggu saat chat anonim? Laporkan!\n\n" +
+        "• /report — Laporkan partner yang mengganggu\n" +
+        "• Laporan masuk ke admin untuk ditindaklanjuti\n\n" +
+        "━━━ 📬 *HUBUNGI ADMIN* ━━━\n" +
+        "Butuh bantuan atau ada pertanyaan?\n\n" +
+        "• /contact — Kirim pesan langsung ke admin\n" +
+        "• Identitasmu tetap anonim, admin akan membalas\n\n" +
         "━━━ 🎁 *REFERRAL* ━━━\n" +
         "Ajak teman dan dapat bonus kuota menfess gratis!\n\n" +
         "• /referral — Lihat link & statistik referralmu\n" +
@@ -217,7 +236,27 @@ async function handleMessage(msg, env, api) {
   if (text === "🧾 Command Admin" && uidNum === env.ADMIN_ID) return handleAdminHelp(chatId, api);
   if (text.startsWith(".") && uidNum === env.ADMIN_ID) return handleAdminCmd(text, chatId, env, api);
 
-  // ── PRIORITAS 5: menfess trigger (case-insensitive) ─
+  // ── PRIORITAS 5: cek report pending (user sedang ketik alasan) ──
+  const reportPendingPartnerId = await redisGetReportPending(env, uidNum);
+  if (reportPendingPartnerId) {
+    if (text.toLowerCase() === "/batal") {
+      await redisDelReportPending(env, uidNum);
+      return api.send({ chat_id: chatId, text: "❌ Laporan dibatalkan." });
+    }
+    if (text) {
+      await redisDelReportPending(env, uidNum);
+      await submitReport(uidNum, chatId, reportPendingPartnerId, text, env, api);
+      return;
+    }
+  }
+
+  // ── PRIORITAS 6: cek mode contact admin ────
+  const contactMode = await redisGetContact(env, uidNum);
+  if (contactMode === "active") {
+    return handleContactRelay(msg, uidNum, chatId, env, api);
+  }
+
+  // ── PRIORITAS 7: menfess trigger (case-insensitive) ─
 
   const rawText    = msg.text || "";
   const rawCaption = msg.caption || "";
@@ -520,6 +559,259 @@ async function handleMenfess(msg, userId, uidNum, chatId, env, api) {
 }
 
 // ═══════════════════════════════════════════════
+//  REPORT & CONTACT ADMIN
+// ═══════════════════════════════════════════════
+
+// Redis helper sederhana untuk report/contact (reuse pattern dari _db.js)
+async function redisRaw(env, ...args) {
+  try {
+    const res = await fetch(env.KV_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.KV_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    const data = await res.json();
+    return data?.result ?? null;
+  } catch { return null; }
+}
+
+async function redisGetContact(env, uid) {
+  return redisRaw(env, "GET", `contact_mode:${uid}`);
+}
+async function redisSetContact(env, uid, exSec) {
+  await redisRaw(env, "SET", `contact_mode:${uid}`, "active", "EX", exSec || 1800);
+}
+async function redisDelContact(env, uid) {
+  await redisRaw(env, "DEL", `contact_mode:${uid}`);
+}
+// Mapping: message_id di chat admin → user_id pengirim (untuk admin bisa balas)
+async function redisSaveAdminReply(env, adminMsgId, userId) {
+  await redisRaw(env, "SET", `admin_reply:${adminMsgId}`, String(userId), "EX", 86400);
+}
+async function redisGetAdminReply(env, adminMsgId) {
+  return redisRaw(env, "GET", `admin_reply:${adminMsgId}`);
+}
+// State user sedang mengisi alasan report custom
+async function redisSaveReportPending(env, uid, partnerId) {
+  await redisRaw(env, "SET", `report_pending:${uid}`, String(partnerId), "EX", 300);
+}
+async function redisGetReportPending(env, uid) {
+  return redisRaw(env, "GET", `report_pending:${uid}`);
+}
+async function redisDelReportPending(env, uid) {
+  await redisRaw(env, "DEL", `report_pending:${uid}`);
+}
+
+// ── METODE 1: Report User ──────────────────────
+
+async function handleReportMenu(userId, uidNum, chatId, env, api) {
+  const acUser  = await acGetUser(env, userId);
+  const session = acUser?.status === "chatting" ? await acGetSession(env, userId) : null;
+
+  if (session) {
+    return api.send({
+      chat_id: chatId,
+      text:
+        "🚨 *Laporkan Partner Chat*\n\n" +
+        "Pilih alasan laporanmu.\n" +
+        "Laporan akan langsung dikirim ke admin untuk ditindaklanjuti.\n" +
+        "Identitasmu tetap anonim! 😊",
+      reply_markup: ikbd([
+        [btn("🔞 Konten Tidak Pantas", `rpt_konten_${session.partnerId}`)],
+        [btn("🤬 Kata-kata Kasar / Bullying", `rpt_kasar_${session.partnerId}`)],
+        [btn("🧟 Spam / Iklan Tidak Diinginkan", `rpt_spam_${session.partnerId}`)],
+        [btn("😰 Pelecehan / Ancaman", `rpt_pelecehan_${session.partnerId}`)],
+        [btn("📝 Alasan Lain (Ketik Sendiri)", `rpt_lain_${session.partnerId}`)],
+        [btn("❌ Batal", "rpt_cancel")],
+      ]),
+    });
+  }
+
+  // Tidak sedang chat — arahkan ke contact admin
+  return api.send({
+    chat_id: chatId,
+    text:
+      "🚨 *Laporan ke Admin*\n\n" +
+      "Fitur laporan partner tersedia saat kamu sedang dalam sesi Anonymous Chat.\n\n" +
+      "Kalau mau melaporkan hal lain atau butuh bantuan admin, gunakan *Hubungi Admin*:",
+    reply_markup: ikbd([[btn("📬 Hubungi Admin", "contact_start")]]),
+  });
+}
+
+async function submitReport(uidNum, chatId, partnerId, reason, env, api) {
+  const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+  await tgRaw(env.BOT_TOKEN, "sendMessage", {
+    chat_id: env.ADMIN_ID,
+    parse_mode: "Markdown",
+    text:
+      "🚨 *LAPORAN USER MASUK*\n" +
+      "━━━━━━━━━━━━━━━━━━\n" +
+      `👤 *Pelapor ID:* \`${uidNum}\`\n` +
+      `🎯 *Dilaporkan ID:* \`${partnerId}\`\n` +
+      `📋 *Alasan:* ${reason}\n` +
+      `🕐 *Waktu:* ${now}\n` +
+      "━━━━━━━━━━━━━━━━━━\n" +
+      "_Tindakan yang bisa dilakukan:_\n" +
+      `\`.bl ${partnerId} [alasan]\` — Blokir user\n` +
+      `\`.mute ${partnerId} 24 h\` — Mute 24 jam`,
+  });
+  await api.send({
+    chat_id: chatId,
+    text:
+      "✅ *Laporan berhasil dikirim!*\n\n" +
+      "Terima kasih sudah melaporkan. Admin akan segera menindaklanjuti.\n\n" +
+      "Sementara itu:\n" +
+      "• /next — Ganti ke partner lain\n" +
+      "• /stop — Keluar dari sesi chat",
+  });
+}
+
+// ── METODE 2: Hubungi Admin ────────────────────
+
+async function handleContactMenu(userId, uidNum, chatId, env, api) {
+  return api.send({
+    chat_id: chatId,
+    text:
+      "📬 *Hubungi Admin*\n\n" +
+      "Kamu bisa kirim pesan apapun ke admin secara anonim.\n" +
+      "Admin tidak akan tahu siapa kamu, tapi bisa membalas pesanmu lewat bot!\n\n" +
+      "💬 *Yang bisa dikirim:* teks, foto, video, voice note, stiker, dokumen.\n\n" +
+      "Klik tombol di bawah untuk mulai:",
+    reply_markup: ikbd([
+      [btn("✉️ Mulai Kirim Pesan ke Admin", "contact_start")],
+      [btn("❌ Batal", "contact_cancel")],
+    ]),
+  });
+}
+
+async function handleContactRelay(msg, uidNum, chatId, env, api) {
+  const text = (msg.text || "").trim();
+
+  // User mau keluar dari mode contact
+  if (text === "/selesai" || text === "/batal" || text.toLowerCase() === "/stop") {
+    await redisDelContact(env, uidNum);
+    return api.send({
+      chat_id: chatId,
+      text: "✅ Sesi kontak dengan admin selesai.\n\nAdmin akan membalas jika diperlukan. Terima kasih! 😊",
+      reply_markup: mainMenuKbd(false),
+    });
+  }
+
+  const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+  const header = `📬 *PESAN DARI USER*\n━━━━━━━━━━━━━━━━━━\n👤 ID: \`${uidNum}\`\n🕐 ${now}\n━━━━━━━━━━━━━━━━━━\n`;
+  let adminMsgResult;
+
+  try {
+    if (msg.text) {
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendMessage", {
+        chat_id: env.ADMIN_ID,
+        parse_mode: "Markdown",
+        text: header + msg.text,
+      });
+    } else if (msg.photo) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "📷 _[Foto]_" });
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendPhoto", {
+        chat_id: env.ADMIN_ID,
+        photo: msg.photo[msg.photo.length - 1].file_id,
+        caption: msg.caption ? `💬 ${msg.caption}` : undefined,
+      });
+    } else if (msg.video) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "🎥 _[Video]_" });
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendVideo", {
+        chat_id: env.ADMIN_ID,
+        video: msg.video.file_id,
+        caption: msg.caption ? `💬 ${msg.caption}` : undefined,
+      });
+    } else if (msg.voice) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "🎙️ _[Voice Note]_" });
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: env.ADMIN_ID, voice: msg.voice.file_id });
+    } else if (msg.sticker) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "🎭 _[Stiker]_" });
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendSticker", { chat_id: env.ADMIN_ID, sticker: msg.sticker.file_id });
+    } else if (msg.document) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "📄 _[Dokumen]_" });
+      adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendDocument", {
+        chat_id: env.ADMIN_ID,
+        document: msg.document.file_id,
+        caption: msg.caption ? `💬 ${msg.caption}` : undefined,
+      });
+    } else {
+      return api.send({ chat_id: chatId, text: "⚠️ Tipe media ini belum didukung. Coba kirim teks, foto, video, atau voice note ya!" });
+    }
+
+    // Simpan mapping message_id → user_id agar admin bisa reply
+    if (adminMsgResult?.ok && adminMsgResult?.result?.message_id) {
+      await redisSaveAdminReply(env, adminMsgResult.result.message_id, uidNum);
+    }
+
+    await api.send({
+      chat_id: chatId,
+      text:
+        "✅ Pesanmu terkirim ke admin!\n\n" +
+        "Admin akan membalas jika diperlukan.\n" +
+        "Lanjut kirim pesan, atau ketik /selesai untuk keluar.",
+    });
+
+  } catch (e) {
+    console.error("contact relay error:", e.message);
+    await api.send({ chat_id: chatId, text: "❌ Gagal mengirim pesan. Coba lagi ya!" });
+  }
+}
+
+// Admin me-reply pesan user → bot teruskan balasan ke user
+async function handleAdminReply(msg, env, api) {
+  const repliedMsgId = msg.reply_to_message?.message_id;
+  if (!repliedMsgId) return;
+
+  const targetUserId = await redisGetAdminReply(env, repliedMsgId);
+  if (!targetUserId) return; // bukan pesan dari user, abaikan
+
+  try {
+    if (msg.text) {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", {
+        chat_id: Number(targetUserId),
+        parse_mode: "Markdown",
+        text: `📩 *Balasan dari Admin:*\n\n${msg.text}`,
+      });
+    } else if (msg.photo) {
+      await tgRaw(env.BOT_TOKEN, "sendPhoto", {
+        chat_id: Number(targetUserId),
+        photo: msg.photo[msg.photo.length - 1].file_id,
+        caption: msg.caption ? `📩 *Balasan Admin:* ${msg.caption}` : "📩 *Balasan dari Admin*",
+        parse_mode: "Markdown",
+      });
+    } else if (msg.video) {
+      await tgRaw(env.BOT_TOKEN, "sendVideo", {
+        chat_id: Number(targetUserId),
+        video: msg.video.file_id,
+        caption: msg.caption ? `📩 *Balasan Admin:* ${msg.caption}` : "📩 *Balasan dari Admin*",
+        parse_mode: "Markdown",
+      });
+    } else if (msg.voice) {
+      await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: Number(targetUserId), voice: msg.voice.file_id });
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(targetUserId), text: "📩 _(voice note dari Admin)_", parse_mode: "Markdown" });
+    } else if (msg.sticker) {
+      await tgRaw(env.BOT_TOKEN, "sendSticker", { chat_id: Number(targetUserId), sticker: msg.sticker.file_id });
+    } else if (msg.document) {
+      await tgRaw(env.BOT_TOKEN, "sendDocument", {
+        chat_id: Number(targetUserId),
+        document: msg.document.file_id,
+        caption: msg.caption ? `📩 *Balasan Admin:* ${msg.caption}` : "📩 *Balasan dari Admin*",
+        parse_mode: "Markdown",
+      });
+    } else {
+      return; // tipe lain diabaikan
+    }
+
+    await api.send({ chat_id: env.ADMIN_ID, text: `✅ Balasanmu berhasil dikirim ke user \`${targetUserId}\`` });
+
+  } catch (e) {
+    console.error("admin reply error:", e.message);
+    await api.send({ chat_id: env.ADMIN_ID, text: `❌ Gagal mengirim balasan ke user \`${targetUserId}\`. User mungkin sudah memblokir bot.` });
+  }
+}
+
+// ═══════════════════════════════════════════════
 //  ADMIN
 // ═══════════════════════════════════════════════
 
@@ -612,6 +904,68 @@ async function handleCallback(query, env, api) {
   const uidNum = Number(userId);
   const chatId = query.message.chat.id;
   const msgId  = query.message.message_id;
+
+  // ── Report callbacks ─────────────────────────
+
+  if (data === "rpt_cancel") {
+    await api.answer(query.id, "Laporan dibatalkan.");
+    return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Laporan dibatalkan." });
+  }
+
+  if (data.startsWith("rpt_")) {
+    await api.answer(query.id);
+    // Format: rpt_{alasan}_{partnerId}
+    const parts      = data.split("_");
+    const alasan     = parts[1];
+    const partnerId  = parts[2];
+
+    if (alasan === "lain") {
+      // User mau ketik alasan sendiri
+      await redisSaveReportPending(env, uidNum, partnerId);
+      return api.edit({
+        chat_id: chatId, message_id: msgId,
+        text:
+          "📝 *Ketik alasan laporanmu*\n\n" +
+          "Ceritakan apa yang terjadi dengan singkat dan jelas.\n" +
+          "_Contoh: Partner mengirimkan konten tidak pantas_\n\n" +
+          "Ketik pesanmu sekarang 👇\n\n" +
+          "_Ketik /batal untuk membatalkan_",
+      });
+    }
+
+    // Alasan preset
+    const alasanMap = {
+      konten:    "Konten Tidak Pantas 🔞",
+      kasar:     "Kata-kata Kasar / Bullying 🤬",
+      spam:      "Spam / Iklan Tidak Diinginkan 🧟",
+      pelecehan: "Pelecehan / Ancaman 😰",
+    };
+    const reason = alasanMap[alasan] || alasan;
+    await submitReport(uidNum, chatId, partnerId, reason, env, api);
+    return api.edit({ chat_id: chatId, message_id: msgId, text: "✅ Laporan terkirim! Terima kasih." });
+  }
+
+  // ── Contact callbacks ────────────────────────
+
+  if (data === "contact_cancel") {
+    await api.answer(query.id, "Dibatalkan.");
+    return api.edit({ chat_id: chatId, message_id: msgId, text: "❌ Dibatalkan." });
+  }
+
+  if (data === "contact_start") {
+    await api.answer(query.id);
+    // Aktifkan mode contact untuk user ini (30 menit)
+    await redisSetContact(env, uidNum, 1800);
+    return api.edit({
+      chat_id: chatId, message_id: msgId,
+      text:
+        "✉️ *Mode Hubungi Admin Aktif*\n\n" +
+        "Sekarang semua pesanmu akan diteruskan ke admin secara anonim.\n\n" +
+        "💬 Kirim pesan, foto, video, voice note, atau stiker.\n" +
+        "📩 Admin bisa membalas langsung ke kamu lewat bot.\n\n" +
+        "_Mode ini aktif selama 30 menit atau sampai kamu ketik /selesai_",
+    });
+  }
 
   // Gender select
   if (data === "gender_male" || data === "gender_female") {
@@ -713,7 +1067,5 @@ async function handleCallback(query, env, api) {
 
   await api.answer(query.id);
 }
-
-// ── tgRaw helper ───────────────────────────────
 
 
