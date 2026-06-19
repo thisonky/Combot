@@ -143,6 +143,7 @@ async function handleMessage(msg, env, api) {
       textLow === "/report"    ||
       textLow === "/contact"   ||
       textLow === "/referral"  ||
+      textLow === "/donate"    ||
       textLow === "/start"     || textLow.startsWith("/start ") ||
       text === "🚨 Laporkan User"    ||
       text === "📬 Hubungi Admin"    ||
@@ -168,6 +169,25 @@ async function handleMessage(msg, env, api) {
   if (textLow === "/referral") return handleReferral(uidNum, chatId, env, api);
   if (textLow === "/report")   return handleReportMenu(userId, uidNum, chatId, env, api);
   if (textLow === "/contact")  return handleContactMenu(userId, uidNum, chatId, env, api);
+
+    if (textLow === "/donate") {
+    const photoUrl = 'https://ibb.co.com/627jPK1'; 
+    const captionText = 
+      "✨ *Dukung Pengembangan Combo Bot!* ✨\n\n" +
+      "Jika kamu merasa bot ini bermanfaat, kamu bisa memberikan donasi untuk membantu biaya operasional server dan pengembangan fitur baru.\n\n" +
+      "💳 *SCAN QR CODE diatas:* \n" +
+      "Terima kasih atas kebaikan dan dukunganmu! 🤍";
+
+    // Menggunakan tgRaw untuk memastikan method sendPhoto Telegram tereksekusi dengan tepat
+    await tgRaw(env.BOT_TOKEN, "sendPhoto", {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: captionText,
+      parse_mode: 'Markdown'
+    });
+    return;
+  }
+
 
   // ── PRIORITAS 3: keyboard buttons ──────────
 
