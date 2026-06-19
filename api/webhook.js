@@ -173,9 +173,9 @@ async function handleMessage(msg, env, api) {
     if (textLow === "/donate") {
     const photoUrl = 'https://ibb.co.com/627jPK1'; 
     const captionText = 
-      "✨ *Dukung Pengembangan Combo Bot!* ✨\n\n" +
+      "✨ *Dukung 𝙆𝙀𝙆 𝕏 𝙋𝙧𝙤𝙟𝙚𝙘𝙩𝙨* ✨\n\n" +
       "Jika kamu merasa bot ini bermanfaat, kamu bisa memberikan donasi untuk membantu biaya operasional server dan pengembangan fitur baru.\n\n" +
-      "💳 *SCAN QR CODE diatas:* \n" +
+      "📟 *SCAN QR CODE diatas* \n" +
       "Terima kasih atas kebaikan dan dukunganmu! 🤍";
 
     // Menggunakan tgRaw untuk memastikan method sendPhoto Telegram tereksekusi dengan tepat
