@@ -1,11 +1,6 @@
 // api/_db.js — Upstash Redis via HTTP
 // Mengikuti PERSIS pola anonchat asli yang sudah terbukti jalan
 
-// ── Redis core (identik dengan anonchat asli) ──
-
-// api/_db.js — Upstash Redis via HTTP
-// Mengikuti PERSIS pola anonchat asli yang sudah terbukti jalan
-
 // ── Redis core ──
 
 async function redisCmd(env, ...args) {
@@ -29,10 +24,11 @@ async function redisCmd(env, ...args) {
 async function redisGet(env, key) {
   const result = await redisCmd(env, "GET", key);
   if (result === null) return null;
-  try { return JSON.parse(result); } catch { return result; }\n}
+  try { return JSON.parse(result); } catch { return result; }
+}
 
 async function redisSet(env, key, value, exSeconds) {
-  const val = typeof value === \"string\" ? value : JSON.stringify(value);
+  const val = typeof value === "string" ? value : JSON.stringify(value);
   if (exSeconds) {
     await redisCmd(env, "SET", key, val, "EX", exSeconds);
   } else {
