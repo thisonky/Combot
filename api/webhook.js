@@ -304,8 +304,9 @@ async function handleMessage(msg, env, api) {
     const donateMediaUrl = "https://ibb.co.com/627jPK1"; // Ganti dengan URL gambar asli Anda (misal dari Imgur/Telegraph)
 
     // 2. Susun teks caption untuk donasi
-    const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━\n` +
+    const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\n` +
                           `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif 24 jam gratis, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
+                          `📟 *SCAN QR-Code* diatas atau` +
                           `💳 *Dana / GoPay:* \`087763082104\`\n\n` +
                           `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
 
@@ -336,7 +337,7 @@ async function handleMessage(msg, env, api) {
 
     return api.send({
       chat_id: chatId,
-      text: "👋 *Selamat datang di Anon Space!* Bot obrolan Anonymous Chat & Pengirim Menfess otomatis sekaligus.\n\nGunakan tombol di bawah untuk memulai menu navigasi.",
+      text: "👋 *Selamat datang di Anon Space!*\nBot obrolan Anonymous Chat & Pengirim Menfess otomatis sekaligus.\n\nGunakan tombol di bawah untuk memulai menu navigasi.",
       reply_markup: getMainMenuKeyboard()
     });
   }
