@@ -1,116 +1,94 @@
-# 🤖 Combo Bot — Anonymous Chat + Menfess
+<div align="center">
 
-Satu bot, dua fitur utama, gratis selamanya.
+# 💬 Combo Bot — Anonymous Chat & Menfess
 
-| Fitur | Keterangan |
+### Satu bot, dua cara seru buat ngobrol bebas tanpa identitas.
+
+[![Telegram](https://img.shields.io/badge/Telegram-Coba%20Sekarang-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/KEKprojects_bot)
+[![Made by](https://img.shields.io/badge/Made%20by-KEK%20Projects-purple?style=for-the-badge)](https://t.me/KEKprojects_bot)
+
+**[👉 Klik di sini buat langsung coba: @KEKprojects_bot](https://t.me/KEKprojects_bot)**
+
+</div>
+
+---
+
+## ✨ Kenapa Combo Bot?
+
+Pernah kepikiran mau curhat, nembak gebetan, atau sekadar ngobrol sama orang baru — tapi nggak mau ribet bikin akun anonim di mana-mana?
+
+**Combo Bot menggabungkan dua hal yang biasanya kamu cari di bot terpisah, jadi satu:**
+
+| | |
 |---|---|
-| 💌 Menfess | Kirim pesan anonim ke channel |
-| 🔍 Anonymous Chat | Ngobrol 1-on-1 dengan orang asing secara anonim |
+| 💌 | Kirim pesan rahasia ke channel tanpa ketahuan siapa kamu |
+| 🔍 | Ngobrol 1-on-1 sama orang random secara anonim |
+
+Nggak perlu install dua bot, nggak perlu daftar dua kali. Semua langsung jalan dari satu chat.
 
 ---
 
-## 🗂️ Struktur File
+## 🎯 Fitur Utama
 
-```
-combo-bot/
-├── api/
-│   ├── webhook.js   ← Handler utama (semua logika)
-│   ├── _db.js       ← Upstash Redis (anonchat + menfess)
-│   └── _tg.js       ← Telegram API helper
-├── package.json
-├── vercel.json
-└── README.md
-```
+### 💌 Menfess — Spill Tanpa Ketahuan
+Ketik `mfs!` + pesanmu, dan voilà — pesanmu tayang di channel tanpa nama, tanpa username, tanpa jejak.
 
----
+- 📝 Teks, 🖼️ foto, 🎥 video, 🎙️ voice note — semua bisa
+- 👀 Preview dulu sebelum kirim, biar nggak typo
+- ⏱️ Bisa atur auto-hapus otomatis
+- 🗑️ Bisa hapus sendiri kapan aja
 
-## 🚀 Deploy via Browser
+### 🔍 Anonymous Chat — Ngobrol Sama Orang Baru
+Bosen sama circle yang itu-itu aja? Cari partner ngobrol random, tanpa perlu kasih tau siapa kamu.
 
-### 1. Upload ke GitHub
+- ⚡ Matching otomatis dan cepat
+- 🔄 `/next` buat ganti partner kapan aja
+- 🎭 Identitas 100% tersembunyi dari awal sampai akhir
+- 📎 Kirim teks, foto, video, stiker, voice note — bebas
 
-1. Buka [github.com/new](https://github.com/new) → buat repo private
-2. Upload semua file, **pertahankan struktur folder** `api/`
-3. Commit
+### 🎁 Sistem Referral
+Ajak temen pakai link referralmu, kalian berdua dapat bonus kuota menfess gratis. Makin rame, makin untung.
 
-### 2. Deploy ke Vercel
-
-1. Buka [vercel.com](https://vercel.com) → **Add New Project**
-2. Import repo GitHub
-3. Klik **Deploy**
-
-### 3. Set Environment Variables
-
-Di Vercel → **Settings → Environment Variables**, tambahkan:
-
-| Name | Value |
-|---|---|
-| `BOT_TOKEN` | Token dari @BotFather |
-| `CHANNEL_ID` | ID channel menfess (contoh: `-1001234567890`) |
-| `ADMIN_ID` | User ID admin (angka) |
-| `BOT_USERNAME` | Username bot tanpa @ |
-| `UPSTASH_REDIS_URL` | URL dari Upstash REST API |
-| `UPSTASH_REDIS_TOKEN` | Token dari Upstash REST API |
-| `DAILY_MAX` | `3` (max menfess per hari) |
-| `AUTO_DELETE_MINUTES` | `10` |
-| `REFERRAL_BONUS` | `3` |
-| `REFERRAL_WELCOME` | `3` |
-
-Setelah semua terisi → **Redeploy**
-
-### 4. Set Webhook
-
-Buka di browser (ganti nilai sesuai milikmu):
-
-```
-https://api.telegram.org/botTOKEN/setWebhook?url=https://nama-project.vercel.app/webhook
-```
-
-Hasil sukses:
-```json
-{"ok":true,"result":true,"description":"Webhook was set"}
-```
-
-**Bot langsung aktif! 🎉**
+### 🚨 Laporan & Bantuan Admin
+Ketemu partner yang nyebelin? Laporkan langsung dari chat. Butuh bantuan? Hubungi admin tanpa perlu buka identitasmu.
 
 ---
 
-## 📖 Cara Pakai
+## 🚀 Cara Mulai
 
-### User Baru
-1. Ketik `/start`
-2. Pilih gender (untuk anon chat)
-3. Muncul menu utama dengan 2 fitur
+1. **Klik:** [t.me/KEKprojects_bot](https://t.me/KEKprojects_bot)
+2. Ketik `/start`
+3. Pilih mau kirim menfess atau cari teman ngobrol
+4. Selesai — langsung bisa dipakai!
 
-### 💌 Menfess
-- Klik **💌 Kirim Menfess** atau langsung ketik `mfs!` + pesan
-- Mendukung: teks, foto (auto spoiler), video (auto spoiler), voice note
-- Preview sebelum kirim
-- Pilih: Kirim biasa / Auto-delete / Batalkan
-
-### 🔍 Anonymous Chat
-- Klik **🔍 Cari Chat Anonim** atau ketik `/find`
-- Saat terhubung: semua pesan diteruskan ke partner (teks, foto, video, stiker, voice, dll)
-- `/next` — Ganti partner
-- `/stop` — Keluar sesi
-
-### 🎁 Referral
-- `/referral` — Lihat link & statistik referralmu
-- Ajak teman → kamu & teman dapat bonus kuota menfess
+Nggak ada proses ribet, nggak ada data pribadi yang diminta.
 
 ---
 
-## 🧾 Admin Commands
+## 🔒 Soal Privasi
 
-| Command | Fungsi |
-|---|---|
-| `.bl (id) (alasan)` | Blokir user dari menfess |
-| `.unbl (id)` | Unblock user |
-| `.listbl` | Daftar user diblokir |
-| `.mute (id) (durasi) (h\|d)` | Mute sementara |
-| `.unmute (id)` | Cabut mute |
-| `.reset (id)` | Reset limit harian |
-| `.addf (kata)` | Tambah kata terlarang |
-| `.delf (kata)` | Hapus kata terlarang |
-| `.listf` | Daftar keyword blacklist |
-| `.bc (pesan)` | Broadcast ke semua user |
-| `.stats` | Statistik bot |
+Combo Bot dirancang dari awal dengan prinsip **anonimitas itu nomor satu**:
+
+- Pesan menfess tampil di channel tanpa identitas pengirim
+- Saat anonymous chat, partner kamu nggak akan pernah tau username/nama aslimu
+- Laporan dan pesan ke admin juga tetap anonim dari sisi user
+
+---
+
+## 🛠️ Tentang Proyek Ini
+
+Combo Bot dikembangkan dan dikelola oleh **KEK Projects**, sebuah inisiatif independen yang fokus membangun tools dan layanan digital yang praktis dan gratis dipakai siapa aja.
+
+Repositori ini bersifat privat — README ini cuma buat ngenalin proyeknya. Kalau kamu tertarik kolaborasi, punya masukan fitur, atau nemu bug, langsung aja chat lewat bot atau hubungi admin di dalamnya.
+
+---
+
+<div align="center">
+
+### Yuk cobain sekarang, gratis dan langsung bisa dipakai! 🎉
+
+[![Coba Sekarang](https://img.shields.io/badge/💬%20Mulai%20Chat-t.me%2FKEKprojects__bot-2CA5E0?style=for-the-badge)](https://t.me/KEKprojects_bot)
+
+*Dibuat dengan 🤍 oleh KEK Projects*
+
+</div>

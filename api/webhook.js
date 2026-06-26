@@ -82,6 +82,89 @@ async function tgRaw(token, method, body) {
 }
 
 // ═══════════════════════════════════════════════
+//  MY CHAT MEMBER — deteksi user blokir/unblokir bot
+// ═══════════════════════════════════════════════
+
+async function handleMyChatMember(update, env, api) {
+  const oldStatus = update.old_chat_member?.status;
+  const newStatus = update.new_chat_member?.status;
+  const user      = update.from;
+  if (!user) return;
+
+  const userId    = user.id;
+  const firstName = (user.first_name || "User").replace(/([_*`[])/g, "\\$1");
+  const username  = user.username ? `@${user.username}` : "—";
+
+  // kicked = user memblokir bot
+  if (newStatus === "kicked") {
+    // Bersihkan state user di Redis kalau masih aktif
+    try {
+      const acUser  = await acGetUser(env, String(userId));
+      const session = acUser?.status === "chatting"
+        ? await acGetSession(env, String(userId))
+        : null;
+
+      if (session) {
+        // Putus sesi partner juga
+        const partnerData = await acGetUser(env, String(session.partnerId));
+        if (partnerData) {
+          await acSetUser(env, String(session.partnerId), { ...partnerData, status: "idle" });
+        }
+        await acDelSession(env, String(session.partnerId));
+        await acDelSession(env, String(userId));
+
+        // Notifikasi partner bahwa sesi terputus
+        try {
+          await tgRaw(env.BOT_TOKEN, "sendMessage", {
+            chat_id: Number(session.partnerId),
+            text: "👋 Partner keluar dari sesi.\nMau cari yang baru? /find 😊",
+          });
+        } catch {}
+      }
+
+      if (acUser) await acSetUser(env, String(userId), { ...acUser, status: "idle" });
+      await acRemoveFromQueue(env, String(userId));
+    } catch (e) {
+      console.error("my_chat_member cleanup error:", e.message);
+    }
+
+    // Notifikasi admin
+    try {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", {
+        chat_id: env.ADMIN_ID,
+        parse_mode: "Markdown",
+        text:
+          `🚫 *BOT DIBLOKIR*\n\n` +
+          `👤 *Nama:* [${firstName}](tg://user?id=${userId})\n` +
+          `🆔 *User ID:* \`${userId}\`\n` +
+          `🏷️ *Username:* ${username}\n\n` +
+          `_Klik nama di atas untuk buka profil Telegram user._`,
+      });
+    } catch (e) {
+      console.error("my_chat_member admin notify error:", e.message);
+    }
+    return;
+  }
+
+  // member = user yang sebelumnya blokir, sekarang buka blokir / start bot lagi
+  if (oldStatus === "kicked" && newStatus === "member") {
+    try {
+      await tgRaw(env.BOT_TOKEN, "sendMessage", {
+        chat_id: env.ADMIN_ID,
+        parse_mode: "Markdown",
+        text:
+          `✅ *USER BUKA BLOKIR BOT*\n\n` +
+          `👤 *Nama:* [${firstName}](tg://user?id=${userId})\n` +
+          `🆔 *User ID:* \`${userId}\`\n` +
+          `🏷️ *Username:* ${username}`,
+      });
+    } catch (e) {
+      console.error("my_chat_member unblock notify error:", e.message);
+    }
+  }
+}
+
+
 //  VERCEL ENTRY POINT
 // ═══════════════════════════════════════════════
 
@@ -104,12 +187,22 @@ export default async function handler(req, res) {
 
     if (update.callback_query) {
       await handleCallback(update.callback_query, env, api);
+    } else if (update.my_chat_member) {
+      await handleMyChatMember(update.my_chat_member, env, api);
     } else if (update.message) {
       // Cek apakah ini pesan dari admin yang me-reply pesan user
-      if (update.message.from.id === env.ADMIN_ID && update.message.reply_to_message) {
+      // PENTING: kalau isinya command admin (diawali "."), JANGAN diteruskan
+      // sebagai balasan ke user — biarkan diproses sebagai command biasa
+      const isAdminReply =
+        update.message.from.id === env.ADMIN_ID &&
+        update.message.reply_to_message &&
+        !(update.message.text || "").startsWith(".");
+
+      if (isAdminReply) {
         await handleAdminReply(update.message, env, api);
-        // Tetap lanjut proses normal (misal admin juga pakai command)
+        return res.status(200).json({ ok: true }); // stop di sini, jangan diproses ulang
       }
+
       await handleMessage(update.message, env, api);
     }
   } catch (e) {
@@ -130,6 +223,32 @@ async function handleMessage(msg, env, api) {
   const text   = (msg.text || msg.caption || "").trim();
   const textLow = text.toLowerCase(); // untuk perbandingan case-insensitive
 
+  // ── PRIORITAS 0: cek state lintas-konteks dulu ──
+  // Report-pending dan contact-mode HARUS dicek paling awal, sebelum cek
+  // status chatting. Soalnya kedua state ini bisa aktif justru SAAT user
+  // sedang chatting (laporkan partner / hubungi admin saat chat berlangsung).
+  // Kalau dicek belakangan, teks bebas yang diketik user (alasan report,
+  // pesan ke admin) malah ke-relay duluan ke partner chat.
+
+  const reportPendingPartnerId = await redisGetReportPending(env, uidNum);
+  if (reportPendingPartnerId) {
+    if (textLow === "/batal") {
+      await redisDelReportPending(env, uidNum);
+      return api.send({ chat_id: chatId, text: "❌ Laporan dibatalkan." });
+    }
+    if (text) {
+      await redisDelReportPending(env, uidNum);
+      return submitReport(uidNum, chatId, reportPendingPartnerId, text, env, api);
+    }
+    // Kalau pesan tanpa teks (misal stiker/foto saat report pending), abaikan saja
+    return;
+  }
+
+  const contactMode = await redisGetContact(env, uidNum);
+  if (contactMode === "active") {
+    return handleContactRelay(msg, uidNum, chatId, env, api);
+  }
+
   // ── PRIORITAS 1: cek status anon chat dulu ──
   const acUser = await acGetUser(env, userId);
 
@@ -143,7 +262,6 @@ async function handleMessage(msg, env, api) {
       textLow === "/report"    ||
       textLow === "/contact"   ||
       textLow === "/referral"  ||
-      textLow === "/donate"    ||
       textLow === "/start"     || textLow.startsWith("/start ") ||
       text === "🚨 Laporkan User"    ||
       text === "📬 Hubungi Admin"    ||
@@ -169,25 +287,6 @@ async function handleMessage(msg, env, api) {
   if (textLow === "/referral") return handleReferral(uidNum, chatId, env, api);
   if (textLow === "/report")   return handleReportMenu(userId, uidNum, chatId, env, api);
   if (textLow === "/contact")  return handleContactMenu(userId, uidNum, chatId, env, api);
-
-    if (textLow === "/donate") {
-    const photoUrl = 'https://ibb.co.com/627jPK1'; 
-    const captionText = 
-      "✨ *Dukung 𝙆𝙀𝙆 𝕏 𝙋𝙧𝙤𝙟𝙚𝙘𝙩𝙨* ✨\n\n" +
-      "Jika kamu merasa bot ini bermanfaat, kamu bisa memberikan donasi untuk membantu biaya operasional server dan pengembangan fitur baru.\n\n" +
-      "📟 *SCAN QR CODE diatas* \n" +
-      "Terima kasih atas kebaikan dan dukunganmu! 🤍";
-
-    // Menggunakan tgRaw untuk memastikan method sendPhoto Telegram tereksekusi dengan tepat
-    await tgRaw(env.BOT_TOKEN, "sendPhoto", {
-      chat_id: chatId,
-      photo: photoUrl,
-      caption: captionText,
-      parse_mode: 'Markdown'
-    });
-    return;
-  }
-
 
   // ── PRIORITAS 3: keyboard buttons ──────────
 
@@ -249,27 +348,7 @@ async function handleMessage(msg, env, api) {
   if (text === "🧾 Command Admin" && uidNum === env.ADMIN_ID) return handleAdminHelp(chatId, api);
   if (text.startsWith(".") && uidNum === env.ADMIN_ID) return handleAdminCmd(text, chatId, env, api);
 
-  // ── PRIORITAS 5: cek report pending (user sedang ketik alasan) ──
-  const reportPendingPartnerId = await redisGetReportPending(env, uidNum);
-  if (reportPendingPartnerId) {
-    if (text.toLowerCase() === "/batal") {
-      await redisDelReportPending(env, uidNum);
-      return api.send({ chat_id: chatId, text: "❌ Laporan dibatalkan." });
-    }
-    if (text) {
-      await redisDelReportPending(env, uidNum);
-      await submitReport(uidNum, chatId, reportPendingPartnerId, text, env, api);
-      return;
-    }
-  }
-
-  // ── PRIORITAS 6: cek mode contact admin ────
-  const contactMode = await redisGetContact(env, uidNum);
-  if (contactMode === "active") {
-    return handleContactRelay(msg, uidNum, chatId, env, api);
-  }
-
-  // ── PRIORITAS 7: menfess trigger (case-insensitive) ─
+  // ── PRIORITAS 5: menfess trigger (case-insensitive) ─
 
   const rawText    = msg.text || "";
   const rawCaption = msg.caption || "";
@@ -365,11 +444,23 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
     });
   }
 
-  // Match ditemukan
+  // Verifikasi partner masih dalam queue dan masih status searching
+  // (anti race condition: cegah double session kalau dua user match bersamaan)
+  const partnerUser = await acGetUser(env, partnerId);
+  if (!partnerUser || partnerUser.status !== "searching") {
+    // Partner sudah di-claim oleh request lain, coba lagi dari queue baru
+    await acRemoveFromQueue(env, partnerId); // bersihkan kalau stale
+    return api.send({
+      chat_id: chatId,
+      text: "🔍 *Masih nyariin...*\n\nHampir ketemu, tunggu sebentar lagi ya! 😄",
+    });
+  }
+
+  // Match ditemukan — tandai keduanya segera sebelum request lain bisa claim
   await acRemoveFromQueue(env, userId);
   await acRemoveFromQueue(env, partnerId);
 
-  const partner = await acGetUser(env, partnerId);
+  const partner = partnerUser; // sudah di-fetch saat verifikasi di atas
   await acSetUser(env, userId,   { ...user,    status: "chatting" });
   await acSetUser(env, partnerId,{ ...partner, status: "chatting" });
   await acSetSession(env, userId, partnerId);
@@ -448,35 +539,74 @@ async function handleRelay(msg, userId, chatId, acUser, env, api) {
   }
 
   const pid = Number(session.partnerId);
+  const pidStr = String(session.partnerId);
+
+  // Deteksi partner tidak bisa dijangkau (blokir bot / akun dihapus)
+  // dan otomatis putus sesi kedua user
+  async function terminateSession(reason) {
+    const partnerData = await acGetUser(env, pidStr);
+    if (partnerData) await acSetUser(env, pidStr, { ...partnerData, status: "idle" });
+    await acDelSession(env, pidStr);
+    await acDelSession(env, userId);
+    await acSetUser(env, userId, { ...acUser, status: "idle" });
+    await api.send({
+      chat_id: chatId,
+      text:
+        "⚠️ *Partner tidak bisa dijangkau.*\n\n" +
+        "Kemungkinan partner memblokir bot atau akunnya bermasalah.\n" +
+        "Sesi otomatis diakhiri.\n\n" +
+        "Ketik /find untuk cari partner baru!",
+      reply_markup: mainMenuKbd(Number(userId) === env.ADMIN_ID),
+    });
+  }
+
+  // Wrapper kirim ke partner — return false jika partner tidak bisa dijangkau
+  async function sendToPartner(method, body) {
+    const result = await tgRaw(env.BOT_TOKEN, method, { chat_id: pid, ...body });
+    if (!result.ok) {
+      const desc = (result.description || "").toLowerCase();
+      const isUnreachable =
+        result.error_code === 403 ||
+        result.error_code === 404 ||
+        desc.includes("blocked") ||
+        desc.includes("user not found") ||
+        desc.includes("chat not found") ||
+        desc.includes("deactivated");
+      if (isUnreachable) {
+        await terminateSession();
+        return false;
+      }
+    }
+    return true;
+  }
 
   try {
     if (msg.text) {
-      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: pid, text: `💬 ${msg.text}` });
+      await sendToPartner("sendMessage", { text: `💬 ${msg.text}` });
     } else if (msg.photo) {
-      await tgRaw(env.BOT_TOKEN, "sendPhoto", {
-        chat_id: pid,
+      await sendToPartner("sendPhoto", {
         photo: msg.photo[msg.photo.length - 1].file_id,
         ...(msg.caption ? { caption: `💬 ${msg.caption}` } : {}),
       });
     } else if (msg.video) {
-      await tgRaw(env.BOT_TOKEN, "sendVideo", {
-        chat_id: pid,
+      await sendToPartner("sendVideo", {
         video: msg.video.file_id,
         ...(msg.caption ? { caption: `💬 ${msg.caption}` } : {}),
       });
     } else if (msg.voice) {
-      await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: pid, voice: msg.voice.file_id });
+      await sendToPartner("sendVoice", { voice: msg.voice.file_id });
     } else if (msg.sticker) {
-      await tgRaw(env.BOT_TOKEN, "sendSticker", { chat_id: pid, sticker: msg.sticker.file_id });
+      await sendToPartner("sendSticker", { sticker: msg.sticker.file_id });
     } else if (msg.video_note) {
-      await tgRaw(env.BOT_TOKEN, "sendVideoNote", { chat_id: pid, video_note: msg.video_note.file_id });
+      await sendToPartner("sendVideoNote", { video_note: msg.video_note.file_id });
     } else if (msg.audio) {
-      await tgRaw(env.BOT_TOKEN, "sendAudio", { chat_id: pid, audio: msg.audio.file_id });
+      await sendToPartner("sendAudio", { audio: msg.audio.file_id });
     } else if (msg.document) {
-      await tgRaw(env.BOT_TOKEN, "sendDocument", { chat_id: pid, document: msg.document.file_id });
+      await sendToPartner("sendDocument", { document: msg.document.file_id });
     }
   } catch (e) {
     console.error("relay error:", e.message);
+    await api.send({ chat_id: chatId, text: "⚠️ Gagal mengirim pesan. Coba lagi." });
   }
 }
 
@@ -525,7 +655,7 @@ async function handleMenfess(msg, userId, uidNum, chatId, env, api) {
     });
   }
 
-  const cleanContent = rawText.replace(/^mfs!/i, "💌").trim();
+  const cleanContent = (rawText || rawCaption).replace(/^mfs!/i, "💌").trim();
   if (!cleanContent || cleanContent === "💌") return api.send({ chat_id: chatId, text: "❌ Isi menfessnya kosong!\nContoh: `mfs! Hai semuanya 😊`" });
 
   const blockedKw = await dbContainsBlacklistedKw(env, cleanContent);
@@ -624,6 +754,14 @@ async function handleReportMenu(userId, uidNum, chatId, env, api) {
   });
 }
 
+// Escape karakter spesial Markdown LEGACY (bukan MarkdownV2) agar teks bebas
+// dari user tidak merusak format atau bikin Telegram API menolak pesan
+// (error "can't parse entities"). Markdown legacy cuma butuh escape: _ * ` [
+function escapeMd(text) {
+  if (!text) return text;
+  return String(text).replace(/([_*`[])/g, "\\$1");
+}
+
 async function submitReport(uidNum, chatId, partnerId, reason, env, api) {
   const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
   await tgRaw(env.BOT_TOKEN, "sendMessage", {
@@ -634,7 +772,7 @@ async function submitReport(uidNum, chatId, partnerId, reason, env, api) {
       "━━━━━━━━━━━━━━━━━━\n" +
       `👤 *Pelapor ID:* \`${uidNum}\`\n` +
       `🎯 *Dilaporkan ID:* \`${partnerId}\`\n` +
-      `📋 *Alasan:* ${reason}\n` +
+      `📋 *Alasan:* ${escapeMd(reason)}\n` +
       `🕐 *Waktu:* ${now}\n` +
       "━━━━━━━━━━━━━━━━━━\n" +
       "_Tindakan yang bisa dilakukan:_\n" +
@@ -669,13 +807,20 @@ async function handleContactRelay(msg, uidNum, chatId, env, api) {
   const text = (msg.text || "").trim();
 
   // User mau keluar dari mode contact
-  if (text === "/selesai" || text === "/batal" || text.toLowerCase() === "/stop") {
+  if (text === "/selesai" || text === "/batal") {
     await redisDelContact(env, uidNum);
     return api.send({
       chat_id: chatId,
       text: "✅ Sesi kontak selesai. Makasih! 😊",
       reply_markup: mainMenuKbd(false),
     });
+  }
+
+  // /stop: hapus contact mode dulu, lalu lanjut handleStop
+  // supaya sesi chat anonim (kalau aktif) juga ikut diputus
+  if (text.toLowerCase() === "/stop") {
+    await redisDelContact(env, uidNum);
+    return handleStop(String(uidNum), chatId, env, api);
   }
 
   const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
@@ -687,7 +832,7 @@ async function handleContactRelay(msg, uidNum, chatId, env, api) {
       adminMsgResult = await tgRaw(env.BOT_TOKEN, "sendMessage", {
         chat_id: env.ADMIN_ID,
         parse_mode: "Markdown",
-        text: header + msg.text,
+        text: header + escapeMd(msg.text),
       });
     } else if (msg.photo) {
       await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, parse_mode: "Markdown", text: header + "📷 _[Foto]_" });
@@ -749,7 +894,7 @@ async function handleAdminReply(msg, env, api) {
       await tgRaw(env.BOT_TOKEN, "sendMessage", {
         chat_id: Number(targetUserId),
         parse_mode: "Markdown",
-        text: `📩 *Balasan dari Admin:*\n\n${msg.text}`,
+        text: `📩 *Balasan dari Admin:*\n\n${escapeMd(msg.text)}`,
       });
     } else if (msg.photo) {
       await tgRaw(env.BOT_TOKEN, "sendPhoto", {
@@ -1006,7 +1151,7 @@ async function handleCallback(query, env, api) {
 
     tgRaw(env.BOT_TOKEN, "sendMessage", {
       chat_id: env.ADMIN_ID, parse_mode: "Markdown",
-      text: `📩 *LAPORAN MENFESS*\n━━━━━━━━━━━━━━━\n👤 *Pengirim:* ${pending.senderName}\n🆔 *ID:* \`${uidNum}\`\n🔗 *Link:* [Lihat Pesan](${link})\n💬 *Isi:* ${pending.text}${autoDelete ? `\n⏱️ Auto-delete ${env.AUTO_DEL_MIN} menit` : ""}`,
+      text: `📩 *LAPORAN MENFESS*\n━━━━━━━━━━━━━━━\n👤 *Pengirim:* ${pending.senderName}\n🆔 *ID:* \`${uidNum}\`\n🔗 *Link:* [Lihat Pesan](${link})\n💬 *Isi:* ${escapeMd(pending.text)}${autoDelete ? `\n⏱️ Auto-delete ${env.AUTO_DEL_MIN} menit` : ""}`,
     }).catch(() => {});
     return;
   }

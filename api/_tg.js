@@ -32,7 +32,7 @@ export function tg(token) {
     copyMsg:    (p)           => call("copyMessage", p),
     delete:     (chat, msg)   => call("deleteMessage", { chat_id: chat, message_id: msg }),
     react:      (chat, msg, emoji) => call("setMessageReaction", { chat_id: chat, message_id: msg, reaction: [{ type: "emoji", emoji }] }),
-    setWebhook: (url)         => call("setWebhook", { url, allowed_updates: ["message", "callback_query"] }),
+    setWebhook: (url)         => call("setWebhook", { url, allowed_updates: ["message", "callback_query", "my_chat_member"] }),
   };
 }
 
