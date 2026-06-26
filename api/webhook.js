@@ -306,7 +306,7 @@ async function handleMessage(msg, env, api) {
     // 2. Susun teks caption untuk donasi
     const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\n` +
                           `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif 24 jam gratis, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
-                          `📟 *SCAN QR-Code* diatas atau` +
+                          `📟 *SCAN QR-Code* diatas atau\n` +
                           `💳 *Dana / GoPay:* \`087763082104\`\n\n` +
                           `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
 
