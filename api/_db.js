@@ -2,6 +2,7 @@
 // Mengikuti PERSIS pola anonchat asli yang sudah terbukti jalan
 
 // ── Redis core ──
+// api/_db.js — Upstash Redis via HTTP (Clean Version tanpa Statistik Berat)
 
 async function redisCmd(env, ...args) {
   try {
@@ -40,10 +41,6 @@ async function redisDel(env, key) {
   await redisCmd(env, "DEL", key);
 }
 
-function todayWib() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
-}
-
 // ── Anonymous Chat ──
 export async function acGetUser(env, uid) { return redisGet(env, `ac_user:${uid}`); }
 export async function acSetUser(env, uid, data) { await redisSet(env, `ac_user:${uid}`, data); }
@@ -80,10 +77,6 @@ export async function dbMute(env, uid) { await redisCmd(env, "SADD", "muted_user
 export async function dbUnmute(env, uid) { await redisCmd(env, "SREM", "muted_users", String(uid)); }
 export async function dbCountMuted(env) { return Number(await redisCmd(env, "SCARD", "muted_users")) || 0; }
 
-export async function dbGetDailyCount(env) { const d = todayWib(); return Number(await redisCmd(env, "GET", `daily_msg:${d}`)) || 0; }
-export async function dbIncrementDaily(env) { const d = todayWib(); await redisCmd(env, "INCR", `daily_msg:${d}`); await redisCmd(env, "EXPIRE", `daily_msg:${d}`, 172800); }
-export async function dbResetDaily(env) { const d = todayWib(); await redisDel(env, `daily_msg:${d}`); }
-
 export async function dbContainsBlacklistedKw(env, text) {
   const kws = await redisCmd(env, "SMEMBERS", "blacklist_keywords") || [];
   const t = String(text).toLowerCase();
@@ -95,15 +88,9 @@ export async function dbListKw(env) { return await redisCmd(env, "SMEMBERS", "bl
 export async function dbCountKw(env) { return Number(await redisCmd(env, "SCARD", "blacklist_keywords")) || 0; }
 
 // ── Menfess ──
-export async function dbSaveMenfess(env, msgId, data) {
-  await redisSet(env, `mf_msg:${msgId}`, data, 604800);
-  await redisCmd(env, "INCR", "mf_total_count");
-}
+export async function dbSaveMenfess(env, msgId, data) { await redisSet(env, `mf_msg:${msgId}`, data, 604800); }
 export async function dbGetMenfess(env, msgId) { return redisGet(env, `mf_msg:${msgId}`); }
 export async function dbDeleteMenfess(env, msgId) { await redisDel(env, `mf_msg:${msgId}`); }
-export async function dbCountMenfess(env) {
-  return Number(await redisCmd(env, "GET", "mf_total_count")) || 0;
-}
 
 // ── Pending ──
 export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 300); }
@@ -111,27 +98,19 @@ export async function dbGetPending(env, uid)        { return redisGet(env, `mf_p
 export async function dbDeletePending(env, uid)     { await redisDel(env, `mf_pending:${uid}`); }
 
 // ── Referral ──
-export async function dbGetReferralBonus(env, uid) {
-  return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0;
-}
-export async function dbAddReferralBonus(env, uid, amount) {
-  await redisCmd(env, "INCRBY", `mf_refbonus:${uid}`, amount);
-}
+export async function dbGetReferralBonus(env, uid) { return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0; }
+export async function dbAddReferralBonus(env, uid, amount) { await redisCmd(env, "INCRBY", `mf_refbonus:${uid}`, amount); }
 export async function dbUseReferralBonus(env, uid) {
   const bonus = await dbGetReferralBonus(env, uid);
   if (bonus > 0) { await redisCmd(env, "DECR", `mf_refbonus:${uid}`); return true; }
   return false;
 }
-export async function dbHasUsedReferral(env, uid) {
-  return !!(await redisCmd(env, "EXISTS", `mf_refused:${uid}`));
-}
+export async function dbHasUsedReferral(env, uid) { return !!(await redisCmd(env, "EXISTS", `mf_refused:${uid}`)); }
 export async function dbRecordReferral(env, uid, refId) {
   await redisCmd(env, "SET", `mf_refused:${uid}`, String(refId));
   await redisCmd(env, "SADD", `mf_referrals_list:${refId}`, String(uid));
 }
-export async function dbCountReferrals(env, uid) {
-  return Number(await redisCmd(env, "SCARD", `mf_referrals_list:${uid}`)) || 0;
-}
+export async function dbCountReferrals(env, uid) { return Number(await redisCmd(env, "SCARD", `mf_referrals_list:${uid}`)) || 0; }
 
 // ── Contact Admin & Admin Reply Session ──
 export async function dbGetContactState(env, uid) { return redisGet(env, `contact_state:${uid}`); }
