@@ -3,6 +3,11 @@
 
 // ── Redis core (identik dengan anonchat asli) ──
 
+// api/_db.js — Upstash Redis via HTTP
+// Mengikuti PERSIS pola anonchat asli yang sudah terbukti jalan
+
+// ── Redis core ──
+
 async function redisCmd(env, ...args) {
   try {
     const res = await fetch(env.KV_URL, {
@@ -24,11 +29,10 @@ async function redisCmd(env, ...args) {
 async function redisGet(env, key) {
   const result = await redisCmd(env, "GET", key);
   if (result === null) return null;
-  try { return JSON.parse(result); } catch { return result; }
-}
+  try { return JSON.parse(result); } catch { return result; }\n}
 
 async function redisSet(env, key, value, exSeconds) {
-  const val = typeof value === "string" ? value : JSON.stringify(value);
+  const val = typeof value === \"string\" ? value : JSON.stringify(value);
   if (exSeconds) {
     await redisCmd(env, "SET", key, val, "EX", exSeconds);
   } else {
@@ -44,168 +48,73 @@ function todayWib() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
 }
 
-// ══════════════════════════════════════════
-// ANONYMOUS CHAT — persis sama dengan asli
-// ══════════════════════════════════════════
+// ── Anonymous Chat ──
+export async function acGetUser(env, uid) { return redisGet(env, `ac_user:${uid}`); }
+export async function acSetUser(env, uid, data) { await redisSet(env, `ac_user:${uid}`, data); }
+export async function acGetSession(env, uid) { return redisGet(env, `ac_sess:${uid}`); }
+export async function acSetSession(env, uid, partnerId) { await redisSet(env, `ac_sess:${uid}`, String(partnerId)); }
+export async function acDelSession(env, uid) { await redisDel(env, `ac_sess:${uid}`); }
+export async function acGetQueue(env) { return await redisCmd(env, "LRANGE", "ac_queue", 0, -1) || []; }
+export async function acAddToQueue(env, uid) { await redisCmd(env, "RPUSH", "ac_queue", String(uid)); }
+export async function acRemoveFromQueue(env, uid) { await redisCmd(env, "LREM", "ac_queue", 0, String(uid)); }
+export async function acPickPartner(env, uid) {
+  const queue = await acGetQueue(env);
+  const filtered = queue.filter(id => String(id) !== String(uid));
+  if (filtered.length === 0) return null;
+  const partnerId = filtered[0];
+  await acRemoveFromQueue(env, partnerId);
+  return String(partnerId);
+}
+export async function acIsDone(env, uid) { return !!(await redisCmd(env, "EXISTS", `ac_done:${uid}`)); }
+export async function acMarkDone(env, uid) { await redisSet(env, `ac_done:${uid}`, "1", 5); }
 
-export async function acGetUser(env, uid)       { return redisGet(env, `user:${uid}`); }
-export async function acSetUser(env, uid, data) { return redisSet(env, `user:${uid}`, data); }
+// ── General DB & Admin ──
+export async function dbRegisterUser(env, uid) { await redisCmd(env, "SADD", "all_users", String(uid)); }
+export async function dbCountUsers(env) { return Number(await redisCmd(env, "SCARD", "all_users")) || 0; }
+export async function dbAllUserIds(env) { return await redisCmd(env, "SMEMBERS", "all_users") || []; }
 
-export async function acGetSession(env, uid)    { return redisGet(env, `session:${uid}`); }
-export async function acDelSession(env, uid)    { return redisDel(env, `session:${uid}`); }
+export async function dbIsBlocked(env, uid) { return !!(await redisCmd(env, "SISMEMBER", "blocked_users", String(uid))); }
+export async function dbBlock(env, uid) { await redisCmd(env, "SADD", "blocked_users", String(uid)); }
+export async function dbUnblock(env, uid) { await redisCmd(env, "SREM", "blocked_users", String(uid)); }
+export async function dbListBlocked(env) { return await redisCmd(env, "SMEMBERS", "blocked_users") || []; }
+export async function dbCountBlocked(env) { return Number(await redisCmd(env, "SCARD", "blocked_users")) || 0; }
 
-export async function acSetSession(env, u1, u2) {
-  const now = Date.now();
-  await redisSet(env, `session:${u1}`, { partnerId: u2, startedAt: now }, 86400);
-  await redisSet(env, `session:${u2}`, { partnerId: u1, startedAt: now }, 86400);
-}
+export async function dbIsMuted(env, uid) { return !!(await redisCmd(env, "SISMEMBER", "muted_users", String(uid))); }
+export async function dbMute(env, uid) { await redisCmd(env, "SADD", "muted_users", String(uid)); }
+export async function dbUnmute(env, uid) { await redisCmd(env, "SREM", "muted_users", String(uid)); }
+export async function dbCountMuted(env) { return Number(await redisCmd(env, "SCARD", "muted_users")) || 0; }
 
-export async function acGetQueue(env) {
-  const q = await redisGet(env, "queue");
-  return Array.isArray(q) ? q : [];
-}
+export async function dbGetDailyCount(env) { const d = todayWib(); return Number(await redisCmd(env, "GET", `daily_msg:${d}`)) || 0; }
+export async function dbIncrementDaily(env) { const d = todayWib(); await redisCmd(env, "INCR", `daily_msg:${d}`); await redisCmd(env, "EXPIRE", `daily_msg:${d}`, 172800); }
+export async function dbResetDaily(env) { const d = todayWib(); await redisDel(env, `daily_msg:${d}`); }
 
-export async function acAddToQueue(env, uid) {
-  const q = await acGetQueue(env);
-  if (!q.includes(String(uid))) {
-    q.push(String(uid));
-    await redisSet(env, "queue", q);
-  }
-}
-
-export async function acRemoveFromQueue(env, uid) {
-  const q = await acGetQueue(env);
-  await redisSet(env, "queue", q.filter(x => x !== String(uid)));
-}
-
-export async function acPickPartner(env, excludeId) {
-  const q = await acGetQueue(env);
-  const candidates = q.filter(x => x !== String(excludeId));
-  if (!candidates.length) return null;
-  return candidates[Math.floor(Math.random() * candidates.length)];
-}
-
-export async function acIsDone(env, uid)  { return (await redisGet(env, `done:${uid}`)) !== null; }
-export async function acMarkDone(env, uid){ return redisSet(env, `done:${uid}`, 1, 3600); }
-
-// ══════════════════════════════════════════
-// MENFESS — prefix "mf_" agar tidak tabrakan
-// ══════════════════════════════════════════
-
-export async function dbRegisterUser(env, uid) {
-  await redisSet(env, `mf_user:${uid}`, "1");
-  await redisCmd(env, "SADD", "mf_users_list", String(uid));
-}
-
-export async function dbCountUsers(env) {
-  return Number(await redisCmd(env, "SCARD", "mf_users_list")) || 0;
-}
-
-export async function dbAllUserIds(env) {
-  const r = await redisCmd(env, "SMEMBERS", "mf_users_list");
-  return Array.isArray(r) ? r.map(Number) : [];
-}
-
-// Block
-export async function dbIsBlocked(env, uid) {
-  return redisGet(env, `mf_blocked:${uid}`);
-}
-export async function dbBlock(env, uid, reason) {
-  await redisSet(env, `mf_blocked:${uid}`, {
-    reason,
-    blocked_at: new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }),
-  });
-}
-export async function dbUnblock(env, uid) {
-  const exists = await redisCmd(env, "EXISTS", `mf_blocked:${uid}`);
-  if (!exists) return false;
-  await redisDel(env, `mf_blocked:${uid}`);
-  return true;
-}
-export async function dbListBlocked(env) {
-  const keys = await redisCmd(env, "KEYS", "mf_blocked:*");
-  if (!Array.isArray(keys) || !keys.length) return [];
-  const results = await Promise.all(keys.map(k => redisGet(env, k)));
-  return keys.map((k, i) => ({ user_id: k.replace("mf_blocked:", ""), ...results[i] }));
-}
-export async function dbCountBlocked(env) {
-  const keys = await redisCmd(env, "KEYS", "mf_blocked:*");
-  return Array.isArray(keys) ? keys.length : 0;
-}
-
-// Mute
-export async function dbIsMuted(env, uid) {
-  const raw = await redisGet(env, `mf_muted:${uid}`);
-  if (!raw) return null;
-  if (new Date(raw) <= new Date()) { await redisDel(env, `mf_muted:${uid}`); return null; }
-  return raw;
-}
-export async function dbMute(env, uid, until) {
-  const ttl = Math.ceil((until - new Date()) / 1000);
-  await redisCmd(env, "SET", `mf_muted:${uid}`, until.toISOString(), "EX", ttl);
-}
-export async function dbUnmute(env, uid) {
-  const exists = await redisCmd(env, "EXISTS", `mf_muted:${uid}`);
-  if (!exists) return false;
-  await redisDel(env, `mf_muted:${uid}`);
-  return true;
-}
-export async function dbCountMuted(env) {
-  const keys = await redisCmd(env, "KEYS", "mf_muted:*");
-  return Array.isArray(keys) ? keys.length : 0;
-}
-
-// Daily limit
-export async function dbGetDailyCount(env, uid) {
-  return Number(await redisCmd(env, "GET", `mf_daily:${uid}:${todayWib()}`)) || 0;
-}
-export async function dbIncrementDaily(env, uid) {
-  const key = `mf_daily:${uid}:${todayWib()}`;
-  await redisCmd(env, "INCR", key);
-  await redisCmd(env, "EXPIRE", key, 172800);
-}
-export async function dbResetDaily(env, uid) {
-  const key = `mf_daily:${uid}:${todayWib()}`;
-  const exists = await redisCmd(env, "EXISTS", key);
-  if (!exists) return false;
-  await redisDel(env, key);
-  return true;
-}
-
-// Keywords
 export async function dbContainsBlacklistedKw(env, text) {
-  const kws = await redisCmd(env, "SMEMBERS", "mf_kwbl");
-  if (!Array.isArray(kws) || !kws.length) return null;
-  const lower = text.toLowerCase();
-  for (const kw of kws) if (lower.includes(kw.toLowerCase())) return kw;
-  return null;
+  const kws = await redisCmd(env, "SMEMBERS", "blacklist_keywords") || [];
+  const t = String(text).toLowerCase();
+  return kws.some(k => t.includes(String(k).toLowerCase()));
 }
-export async function dbAddKw(env, kw)  { await redisCmd(env, "SADD", "mf_kwbl", kw); }
-export async function dbDelKw(env, kw)  { return Number(await redisCmd(env, "SREM", "mf_kwbl", kw)) > 0; }
-export async function dbListKw(env)     { const r = await redisCmd(env, "SMEMBERS", "mf_kwbl"); return Array.isArray(r) ? r.sort() : []; }
-export async function dbCountKw(env)    { return Number(await redisCmd(env, "SCARD", "mf_kwbl")) || 0; }
+export async function dbAddKw(env, kw) { await redisCmd(env, "SADD", "blacklist_keywords", String(kw).trim()); }
+export async function dbDelKw(env, kw) { await redisCmd(env, "SREM", "blacklist_keywords", String(kw).trim()); }
+export async function dbListKw(env) { return await redisCmd(env, "SMEMBERS", "blacklist_keywords") || []; }
+export async function dbCountKw(env) { return Number(await redisCmd(env, "SCARD", "blacklist_keywords")) || 0; }
 
-// Menfess data
-export async function dbSaveMenfess(env, msgId, uid, autoDeleteAt) {
-  const ttl = autoDeleteAt ? Math.ceil((autoDeleteAt - new Date()) / 1000) + 120 : 604800;
-  await redisCmd(env, "SET", `mf_msg:${msgId}`,
-    JSON.stringify({ user_id: uid, sent_at: new Date().toISOString(), auto_delete_at: autoDeleteAt?.toISOString() || null }),
-    "EX", ttl
-  );
+// ── Menfess ──
+export async function dbSaveMenfess(env, msgId, data) {
+  await redisSet(env, `mf_msg:${msgId}`, data, 604800);
+  await redisCmd(env, "INCR", "mf_total_count");
 }
-export async function dbGetMenfess(env, msgId)    { return redisGet(env, `mf_msg:${msgId}`); }
+export async function dbGetMenfess(env, msgId) { return redisGet(env, `mf_msg:${msgId}`); }
 export async function dbDeleteMenfess(env, msgId) { await redisDel(env, `mf_msg:${msgId}`); }
 export async function dbCountMenfess(env) {
-  const keys = await redisCmd(env, "KEYS", "mf_msg:*");
-  return Array.isArray(keys) ? keys.length : 0;
+  return Number(await redisCmd(env, "GET", "mf_total_count")) || 0;
 }
 
-// Pending
+// ── Pending ──
 export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 300); }
 export async function dbGetPending(env, uid)        { return redisGet(env, `mf_pending:${uid}`); }
 export async function dbDeletePending(env, uid)     { await redisDel(env, `mf_pending:${uid}`); }
 
-// Referral
+// ── Referral ──
 export async function dbGetReferralBonus(env, uid) {
   return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0;
 }
@@ -220,10 +129,18 @@ export async function dbUseReferralBonus(env, uid) {
 export async function dbHasUsedReferral(env, uid) {
   return !!(await redisCmd(env, "EXISTS", `mf_refused:${uid}`));
 }
-export async function dbRecordReferral(env, newUid, referrerId) {
-  await redisCmd(env, "SET", `mf_refused:${newUid}`, String(referrerId));
-  await redisCmd(env, "INCR", `mf_refcount:${referrerId}`);
+export async function dbRecordReferral(env, uid, refId) {
+  await redisCmd(env, "SET", `mf_refused:${uid}`, String(refId));
+  await redisCmd(env, "SADD", `mf_referrals_list:${refId}`, String(uid));
 }
 export async function dbCountReferrals(env, uid) {
-  return Number(await redisCmd(env, "GET", `mf_refcount:${uid}`)) || 0;
+  return Number(await redisCmd(env, "SCARD", `mf_referrals_list:${uid}`)) || 0;
 }
+
+// ── Contact Admin & Admin Reply Session ──
+export async function dbGetContactState(env, uid) { return redisGet(env, `contact_state:${uid}`); }
+export async function dbSetContactState(env, uid, data) { await redisSet(env, `contact_state:${uid}`, data, 86400); }
+export async function dbDelContactState(env, uid) { await redisDel(env, `contact_state:${uid}`); }
+export async function dbGetAdminReply(env, adminId) { return redisGet(env, `admin_reply:${adminId}`); }
+export async function dbSetAdminReply(env, adminId, targetUid) { await redisSet(env, `admin_reply:${adminId}`, { targetUid }, 3600); }
+export async function dbDelAdminReply(env, adminId) { await redisDel(env, `admin_reply:${adminId}`); }
