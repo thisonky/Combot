@@ -1,8 +1,7 @@
 // api/webhook.js — Combo Bot v1.0 (Anonymous Chat + Menfess)
 // Vercel Serverless | Upstash Redis
 
-// api/webhook.js — Combo Bot v1.0 (Anonymous Chat + Menfess + Report & Contact)
-// api/webhook.js — Combo Bot v1.1 (AnonChat + Menfess Bebas Media Tanpa Paksa Target + Fitur Admin Utuh)
+// api/webhook.js — Combo Bot v1.3 (Clean Panel, Bebas Media Menfess, Deteksi Blokir + Fitur /donate)
 import { tg, ikbd, btn, burl } from "./_tg.js";
 import {
   acGetUser, acSetUser, acGetSession, acDelSession, acSetSession,
@@ -11,9 +10,8 @@ import {
   dbRegisterUser, dbCountUsers, dbAllUserIds,
   dbIsBlocked, dbBlock, dbUnblock, dbListBlocked, dbCountBlocked,
   dbIsMuted, dbMute, dbUnmute, dbCountMuted,
-  dbGetDailyCount, dbIncrementDaily, dbResetDaily,
   dbContainsBlacklistedKw, dbAddKw, dbDelKw, dbListKw, dbCountKw,
-  dbSaveMenfess, dbGetMenfess, dbDeleteMenfess, dbCountMenfess,
+  dbSaveMenfess, dbGetMenfess, dbDeleteMenfess,
   dbSavePending, dbGetPending, dbDeletePending,
   dbGetReferralBonus, dbAddReferralBonus, dbUseReferralBonus,
   dbHasUsedReferral, dbRecordReferral, dbCountReferrals,
@@ -118,48 +116,65 @@ async function handleMessage(msg, env, api) {
   }
 
   // ==========================================
-  // FITUR UTUH PERINTAH ADMIN
+  // FITUR UTUH PERINTAH ADMIN (CLEAN PANEL)
   // ==========================================
   if (uidNum === env.ADMIN_ID) {
     if (text === "/panel" || text === "/status") {
       const uCount = await dbCountUsers(env);
       const bCount = await dbCountBlocked(env);
       const mCount = await dbCountMuted(env);
-      const dCount = await dbGetDailyCount(env);
       const kCount = await dbCountKw(env);
-      const mfCount = await dbCountMenfess(env);
 
-      const panelTxt = `⚙️ *PANEL KONTROL ADMIN COMBO BOT*\n━━━━━━━━━━━━━━━\n` +
+      const panelTxt = `⚙️ *PANEL KONTROL ADMIN*\n━━━━━━━━━━━━━━━\n` +
                        `👤 Total Pengguna Terdaftar: *${uCount}*\n` +
-                       `📝 Total Menfess Terkirim: *${mfCount}*\n` +
-                       `💬 Pesan AnonChat Hari Ini: *${dCount}*\n` +
                        `🔒 Pengguna Diblokir: *${bCount}*\n` +
                        `🔇 Pengguna Dimute: *${mCount}*\n` +
                        `🚫 Kata Sensor Aktif: *${kCount}*\n\n` +
                        `🛠️ *Daftar Perintah Manajemen Admin*:\n` +
-                       `• \`/bc [pesan]\` - Broadcast teks ke semua user\n` +
+                       `• \`/bc [pesan]\` - Broadcast ke semua user + Deteksi Blokir\n` +
                        `• \`/block [ID]\` - Blokir user permanen\n` +
                        `• \`/unblock [ID]\` - Buka blokir user\n` +
-                       `• \`/mute [ID]\` - Mute user (tidak bisa kirim pesan/menfess)\n` +
-                       `• \`/unmute [ID]\` - Lepas status mute user\n` +
+                       `• \`/mute [ID]\` - Mute user\n` +
+                       `• \`/unmute [ID]\` - Lepas mute user\n` +
                        `• \`/addkw [kata]\` - Tambah kata dilarang\n` +
                        `• \`/delkw [kata]\` - Hapus kata dilarang\n` +
-                       `• \`/listkw\` - Tampilkan semua kata sensor\n` +
-                       `• \`/resetdaily\` - Reset hitungan pesan harian`;
+                       `• \`/listkw\` - Tampilkan semua kata sensor`;
       return api.send({ chat_id: chatId, text: panelTxt, parse_mode: "Markdown" });
     }
 
+    // Broadcast Feature + Deteksi Instan Akun yang Hapus/Blokir Bot
     if (text.startsWith("/bc ") || text.startsWith("/broadcast ")) {
       const bcMsg = text.replace(/^\/(bc|broadcast)\s+/, "");
       if (!bcMsg) return api.send({ chat_id: chatId, text: "⚠️ Format salah. Contoh: \`/bc Halo semuanya\`" });
+      
       const allUsers = await dbAllUserIds(env);
       let successBc = 0;
       await api.send({ chat_id: chatId, text: `⏳ Memulai proses broadcast ke ${allUsers.length} pengguna...` });
+      
       for (const u of allUsers) {
         try {
-          const res = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(u), text: `📢 *PENGUMUMAN ADMIN*:\n\n${bcMsg}`, parse_mode: "Markdown" });
-          if (res.ok) successBc++;
-        } catch {}
+          const res = await tgRaw(env.BOT_TOKEN, "sendMessage", { 
+            chat_id: Number(u), 
+            text: `📢 *PENGUMUMAN ADMIN*:\n\n${bcMsg}`, 
+            parse_mode: "Markdown" 
+          });
+
+          if (res.ok) {
+            successBc++;
+          } else if (res.description && res.description.includes("blocked by the user")) {
+            const linkProfile = `[User](tg://user?id=${u})`;
+            const notifyTxt = `🚫 *NOTIFIKASI BOT DIHAPUS/DIBLOKIR*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Nama:* ${linkProfile}\n🆔 *User ID:* \`${u}\`\n🏷️ *Username:* _Tidak diketahui saat memblokir_`;
+            
+            await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, text: notifyTxt, parse_mode: "Markdown" }).catch(() => {});
+          }
+        } catch (e) {
+          if (e.message && e.message.includes("blocked")) {
+            const linkProfile = `[User](tg://user?id=${u})`;
+            const notifyTxt = `🚫 *NOTIFIKASI BOT DIHAPUS/DIBLOKIR*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Nama:* ${linkProfile}\n🆔 *User ID:* \`${u}\`\n🏷️ *Username:* _Tidak diketahui saat memblokir_`;
+            
+            await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, text: notifyTxt, parse_mode: "Markdown" }).catch(() => {});
+          }
+        }
       }
       return api.send({ chat_id: chatId, text: `✅ Broadcast selesai. Pesan berhasil terkirim ke *${successBc}* pengguna.` });
     }
@@ -208,11 +223,6 @@ async function handleMessage(msg, env, api) {
       return api.send({ chat_id: chatId, text: `🚫 *Daftar Kata Sensor Bot*:\n\n${list.map((k, i) => `${i+1}. \`${k}\``).join("\n")}`, parse_mode: "Markdown" });
     }
 
-    if (text === "/resetdaily") {
-      await dbResetDaily(env);
-      return api.send({ chat_id: chatId, text: "🔄 Statistik hitungan pesan harian berhasil di-reset menjadi 0." });
-    }
-
     if (text === "/cancelreply") {
       await dbDelAdminReply(env, env.ADMIN_ID);
       return api.send({ chat_id: chatId, text: "✅ Mode balasan dibatalkan.", reply_markup: getMainMenuKeyboard() });
@@ -243,9 +253,7 @@ async function handleMessage(msg, env, api) {
     return;
   }
 
-  // ====================================================
-  // ⭐ INTERSEPT MENFESS BARU: BEBAS MEDIA & TANPA TARGET ⭐
-  // ====================================================
+  // Intersept Menfess Baru (Bebas Media & Tanpa Target)
   const pending = await dbGetPending(env, uidNum);
   if (pending && pending.step === "waiting_text") {
     if (text === "/cancel" || text === "🛑 Batal") {
@@ -253,13 +261,11 @@ async function handleMessage(msg, env, api) {
       return api.send({ chat_id: chatId, text: "❌ Pengiriman menfess dibatalkan.", reply_markup: getMainMenuKeyboard() });
     }
 
-    // Cek Sensor kata kasar pada teks atau caption media
     const contentText = msg.text || msg.caption || "";
     if (contentText && (await dbContainsBlacklistedKw(env, contentText))) {
       return api.send({ chat_id: chatId, text: "❌ Pesanmu mengandung kata-kata yang dilarang/kasar. Harap ubah kata-katamu!" });
     }
 
-    // Mengamankan data media apa pun yang dikirim oleh user
     pending.text = msg.text || "";
     pending.caption = msg.caption || "";
     
@@ -279,9 +285,7 @@ async function handleMessage(msg, env, api) {
     pending.step = "waiting_confirm";
     await dbSavePending(env, uidNum, pending);
 
-    // Kirimkan feedback pratinjau langsung ke user sebelum dilempar ke channel
     await api.send({ chat_id: chatId, text: "📝 *Konfirmasi Pengiriman Menfess*:\n\nPesan ekspresi Anda siap diterbitkan. Silakan tentukan opsi pengiriman di bawah ini:" });
-    
     return api.send({
       chat_id: chatId,
       text: "Silakan pilih salah satu metode:",
@@ -291,6 +295,29 @@ async function handleMessage(msg, env, api) {
       ])
     });
   }
+
+  // ==========================================
+  // ☕ FITUR DONATE (MEDIA VIA URL + CAPTION)
+  // ==========================================
+  if (text === "/donate" || text === "/donasi") {
+    // 1. Tentukan URL Media Gambar/Banner Donasi Anda di sini
+    const donateMediaUrl = "https://ibb.co.com/627jPK1"; // Ganti dengan URL gambar asli Anda (misal dari Imgur/Telegraph)
+
+    // 2. Susun teks caption untuk donasi
+    const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━\n` +
+                          `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif 24 jam gratis, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
+                          `💳 *Dana / GoPay:* \`087763082104\`\n\n` +
+                          `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
+
+    // 3. Kirim menggunakan metode sendPhoto via tgRaw agar mendukung pengiriman via URL secara aman
+    return tgRaw(env.BOT_TOKEN, "sendPhoto", {
+      chat_id: chatId,
+      photo: donateMediaUrl,
+      caption: donateCaption,
+      parse_mode: "Markdown"
+    });
+  }
+
 
   // Start & Deep Linking Referral
   if (text.startsWith("/start")) {
@@ -377,7 +404,7 @@ async function handleMessage(msg, env, api) {
     return api.send({ chat_id: chatId, text: "🛑 Kamu keluar dari obrolan.", reply_markup: getMainMenuKeyboard() });
   }
 
-  // Menu: Kirim Menfess (Sekarang mendukung teks & media bebas)
+  // Menu: Kirim Menfess
   if (text === "📝 Kirim Menfess") {
     await dbSavePending(env, uidNum, { step: "waiting_text", senderName: msg.from.first_name || "Anonymous" });
     return api.send({
@@ -417,10 +444,9 @@ async function handleMessage(msg, env, api) {
     });
   }
 
-  // Relay Chat Biasa Jika Sedang Terhubung Anon Chat
+  // Relay Chat Anon Chat
   const activeSession = await acGetSession(env, uidNum);
   if (activeSession) {
-    await dbIncrementDaily(env);
     if (msg.text) {
       if (await dbContainsBlacklistedKw(env, text)) {
         return api.send({ chat_id: chatId, text: "⚠️ Pesan diblokir otomatis karena mengandung kata dilarang." });
@@ -444,7 +470,7 @@ async function handleMessage(msg, env, api) {
   return api.send({ chat_id: chatId, text: "❓ Perintah tidak dimengerti atau sesi obrolan tidak aktif. Pilih menu di bawah:", reply_markup: getMainMenuKeyboard() });
 }
 
-// ── Callback Query Logic ──
+// Callback Query Logic
 async function handleCallback(query, env, api) {
   const data = query.data;
   const chatId = query.message.chat.id;
@@ -523,7 +549,6 @@ async function handleCallback(query, env, api) {
   }
 }
 
-// Sub-handlers Fitur Report & Kontak Admin
 function handleReportMenu(chatId, api) {
   return api.send({
     chat_id: chatId,
@@ -568,7 +593,6 @@ async function handleAdminReplyMessage(msg, targetUid, env, api) {
   }
 }
 
-// ── Modifikasi Eksekusi Pengiriman Berbagai Jenis Media Ke Channel Tanpa Target Mandatori ──
 async function submitReport(uidNum, pending, autoDelete, env, api) {
   try {
     let method = "sendMessage";
