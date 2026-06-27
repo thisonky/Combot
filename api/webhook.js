@@ -647,7 +647,7 @@ async function submitReport(uidNum, pending, autoDelete, env, api) {
     };
     
     // Menggunakan tag <i> untuk tulisan miring di HTML Telegram
-    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n<i>menfess dikirim melalui @KEKprojects_bot_</i>`;
+    const defaultTail = `\n\n━━━━━━━━━━━━━━━━━\n<i>menfess dari @KEKprojects_bot</i>`;
 
     // Fungsi pembantu untuk membersihkan teks user dari simbol HTML (<, >, &) agar tidak error
     const escapeHtml = (str) => {
