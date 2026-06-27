@@ -641,7 +641,10 @@ async function handleAdminReplyMessage(msg, targetUid, env, api) {
 async function submitReport(uidNum, pending, autoDelete, env, api) {
   try {
     let method = "sendMessage";
-    let body = { chat_id: env.CHANNEL_ID, parse_mode: "Markdown" };
+    let body = {
+      chat_id: env.CHANNEL_ID,
+      parse_mode: "Markdown"
+    };
     const defaultTail = `\n\n━━━━━━━━━━━━━━━\n💌 _Menfess dikirim melalui @KEKprojects_bot_`;
 
     if (pending.mediaType === "text") {
