@@ -643,20 +643,28 @@ async function submitReport(uidNum, pending, autoDelete, env, api) {
     let method = "sendMessage";
     let body = {
       chat_id: env.CHANNEL_ID,
-      parse_mode: "Markdown"
+      parse_mode: "HTML" // Diubah ke HTML agar kebal dari error karakter khusus Markdown
     };
     
-    // Teks ekor miring sesuai permintaan Anda
-    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n_menfess dikirim melalui @KEKprojects_bot_`;
+    // Menggunakan tag <i> untuk tulisan miring di HTML Telegram
+    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n<i>menfess dikirim melalui @KEKprojects_bot_</i>`;
+
+    // Fungsi pembantu untuk membersihkan teks user dari simbol HTML (<, >, &) agar tidak error
+    const escapeHtml = (str) => {
+      if (!str) return "";
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    };
 
     if (pending.mediaType === "text") {
       method = "sendMessage";
-      // Tampilan clean: langsung isi teks menfess + teks ekor
-      body.text = `"${pending.text}"${defaultTail}`;
+      const safeText = escapeHtml(pending.text);
+      body.text = `"${safeText}"${defaultTail}`;
     } else {
-      // Jika ada caption dari user gunakan caption-nya, jika kosong (media saja) jangan beri teks kosong/tanda kutip kosong
-      const userCaption = pending.caption ? `"${pending.caption}"` : "";
-      body.caption = `${userCaption}${defaultTail}`.trim();
+      const safeCaption = pending.caption ? `"${escapeHtml(pending.caption)}"` : "";
+      body.caption = `${safeCaption}${defaultTail}`.trim();
       
       if (pending.mediaType === "photo") {
         method = "sendPhoto";
