@@ -645,14 +645,18 @@ async function submitReport(uidNum, pending, autoDelete, env, api) {
       chat_id: env.CHANNEL_ID,
       parse_mode: "Markdown"
     };
-    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n💌 _Menfess dikirim melalui @KEKprojects_bot_`;
+    
+    // Teks ekor miring sesuai permintaan Anda
+    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n_menfess dikirim melalui @KEKprojects_bot_`;
 
     if (pending.mediaType === "text") {
       method = "sendMessage";
+      // Tampilan clean: langsung isi teks menfess + teks ekor
       body.text = `"${pending.text}"${defaultTail}`;
     } else {
-      const captionText = pending.caption ? `"${pending.caption}"`;
-      body.caption = `${captionText}${defaultTail}`;
+      // Jika ada caption dari user gunakan caption-nya, jika kosong (media saja) jangan beri teks kosong/tanda kutip kosong
+      const userCaption = pending.caption ? `"${pending.caption}"` : "";
+      body.caption = `${userCaption}${defaultTail}`.trim();
       
       if (pending.mediaType === "photo") {
         method = "sendPhoto";
