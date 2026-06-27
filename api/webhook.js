@@ -309,7 +309,7 @@ async function handleMessage(msg, env, api) {
     const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\n` +
                           `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif 24 jam gratis, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
                           `📟 *SCAN QR-Code* diatas atau\n` +
-                          `💳 *Dana / GoPay:* \`087763082104\`\n\n` +
+                          `💳 *Dana / GoPay:* \`0877xxxxxxxx\`\n\n` +
                           `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
 
     return tgRaw(env.BOT_TOKEN, "sendPhoto", {
@@ -641,15 +641,15 @@ async function handleAdminReplyMessage(msg, targetUid, env, api) {
 async function submitReport(uidNum, pending, autoDelete, env, api) {
   try {
     let method = "sendMessage";
-    let body = { chat_id: env.CHANNEL_ID };
-    const defaultTail = `\n━━━━━━━━━━━━━━━\n⏱️ _Dikirim secara anonim_`;
+    let body = { chat_id: env.CHANNEL_ID, parse_mode: "Markdown" };
+    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n💌 _Menfess dikirim melalui @KEKprojects_bot_`;
 
     if (pending.mediaType === "text") {
       method = "sendMessage";
-      body.text = `📩 *MENFESS BARU*\n━━━━━━━━━━━━━━━\n💬 *Pesan:*\n"${pending.text}"${defaultTail}`;
+      body.text = `"${pending.text}"${defaultTail}`;
     } else {
-      const captionText = pending.caption ? `💬 *Pesan:*\n"${pending.caption}"` : `💬 *Pesan:* _[Tanpa Keterangan]_`;
-      body.caption = `📩 *MENFESS BARU*\n━━━━━━━━━━━━━━━\n${captionText}${defaultTail}`;
+      const captionText = pending.caption ? `"${pending.caption}"`;
+      body.caption = `${captionText}${defaultTail}`;
       
       if (pending.mediaType === "photo") {
         method = "sendPhoto";
