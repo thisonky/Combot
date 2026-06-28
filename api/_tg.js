@@ -29,7 +29,11 @@ export const ikbd = (inlineKeyboard) => ({ inline_keyboard: inlineKeyboard });
 export const btn = (text, callbackData) => ({ text, callback_data: callbackData });
 export const burl = (text, url) => ({ text, url });
 
-// Hardened Global Raw Request dengan Logging Protektif
+export function cleanHtml(str) {
+  if (!str) return "";
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export async function tgRaw(token, method, body) {
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -37,13 +41,13 @@ export async function tgRaw(token, method, body) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    const resData = await r.json();
-    if (!resData.ok) {
-      console.error(`[Telegram API Error] Method: ${method} | Code: ${resData.error_code} | Desc: ${resData.description}`);
+    const data = await r.json();
+    if (!data.ok) {
+      console.error(`[TG API Error] ${method}: ${data.description} (${data.error_code})`);
     }
-    return resData;
+    return data;
   } catch (err) {
-    console.error(`[Telegram Network Transport Error] Method: ${method} | Msg: ${err.message}`);
-    return { ok: false, description: err.message };
+    console.error(`[TG Network Error] ${method}: ${err.message}`);
+    return { ok: false, error: err.message };
   }
 }
