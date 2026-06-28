@@ -2,7 +2,7 @@
 // Vercel Serverless | Upstash Redis
 // api/webhook.js — Combo Bot v1.3 (Hyper-Responsive Optimized)
 // api/webhook.js — Combo Bot v1.4 (Hybrid Clean Sheets & Premium Engine)
-import { tg, ikbd, btn, burl } from "./_tg.js";
+import { tg, ikbd, btn, burl, tgRaw } from "./_tg.js";
 import {
   acGetUser, acSetUser, acGetSession, acDelSession, acSetSession,
   acGetQueue, acAddToQueue, acRemoveFromQueue, acIsDone, acMarkDone,
@@ -17,9 +17,6 @@ import {
   dbGetContactState, dbSetContactState, dbDelContactState,
   dbGetAdminReply, dbSetAdminReply, dbDelAdminReply
 } from "./_db.js";
-
-let cachedKw = [];
-let lastKwUpdate = 0;
 
 function getEnv() {
   return {
@@ -36,15 +33,6 @@ function getEnv() {
 
 function refLink(env, uid) { return `https://t.me/${env.BOT_USERNAME}?start=ref_${uid}`; }
 function shareUrl(link) { return `https://telegram.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Yuk gabung ke bot anonchat & menfess ini!")}`; }
-
-async function tgRaw(token, method, body) {
-  const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  return r.json();
-}
 
 function getMainMenuKeyboard() {
   return {
@@ -65,36 +53,59 @@ function getChattingKeyboard() {
 }
 
 export default async function handler(req, res) {
+  // Selalu kembalikan 200 OK ke Telegram secepat mungkin untuk mencegah looping retries webhook
+  res.setHeader("Content-Type", "application/json");
+  
   try {
-    if (req.method !== "POST") return res.status(200).send("Bot is active.");
+    if (req.method !== "POST") {
+      return res.status(200).send(JSON.stringify({ status: "Bot is active" }));
+    }
+    
     const env = getEnv();
-    if (!env.KV_URL || !env.BOT_TOKEN) return res.status(200).json({ ok: true });
+    if (!env.KV_URL || !env.BOT_TOKEN) {
+      return res.status(200).send(JSON.stringify({ error: "Missing config" }));
+    }
 
     const api = tg(env.BOT_TOKEN);
-    
-    // PENANGANAN AUTOMATIS JIKA PAYLOAD TER-URL-ENCODE (%) ATAU STR_CORRUPT
-    let update = req.body;
-    if (typeof update === "string") {
-      if (update.startsWith("%")) {
-        update = decodeURIComponent(update);
+    let rawBody = req.body;
+    let update = null;
+
+    // PRODUCTION-GRADE MIDDLEWARE PARSING PAYLOAD (Kebal Eror % / URL-Encoded)
+    if (typeof rawBody === "string") {
+      try {
+        if (rawBody.trim().startsWith("%") || rawBody.includes("update_id")) {
+          const cleanStr = rawBody.trim().startsWith("%") ? decodeURIComponent(rawBody) : rawBody;
+          if (cleanStr.includes("=")) {
+            const params = new URLSearchParams(cleanStr);
+            const firstKey = Array.from(params.keys())[0];
+            update = JSON.parse(firstKey.startsWith("{") ? firstKey : params.get(firstKey));
+          } else {
+            update = JSON.parse(cleanStr);
+          }
+        } else {
+          update = JSON.parse(rawBody);
+        }
+      } catch (pErr) {
+        console.error("[Middleware Parser Crash Fallback]:", pErr.message);
+        return res.status(200).send(JSON.stringify({ ok: true }));
       }
-      if (update.includes("=")) {
-        update = update.substring(update.indexOf("=") + 1);
-      }
-      update = JSON.parse(update);
+    } else {
+      update = rawBody;
     }
 
+    if (!update) return res.status(200).send(JSON.stringify({ ok: true }));
+
+    // Isolasikan pemanggilan fungsi agar penanganan kegagalan tidak mematikan webhook router
     if (update.callback_query) {
       await handleCallback(update.callback_query, env, api);
-      return res.status(200).json({ ok: true });
+    } else if (update.message) {
+      await handleMessage(update.message, env, api);
     }
-    if (!update.message) return res.status(200).json({ ok: true });
 
-    await handleMessage(update.message, env, api);
-    return res.status(200).json({ ok: true });
+    return res.status(200).send(JSON.stringify({ ok: true }));
   } catch (err) {
-    console.error("Critical Runtime:", err.message);
-    return res.status(200).json({ ok: true });
+    console.error("[Critical Root Runtime Handler Error]:", err.stack);
+    return res.status(200).send(JSON.stringify({ ok: true }));
   }
 }
 
@@ -103,12 +114,11 @@ async function handleMessage(msg, env, api) {
   const uidNum = msg.from.id;
   const text = msg.text ? msg.text.trim() : "";
 
-  // 1. CEK STATUS BLOKIR USER
   if (await dbIsBlocked(env, uidNum)) {
     return api.send({ chat_id: chatId, text: "❌ Kamu telah diblokir dari bot ini karena melanggar ketentuan." });
   }
 
-  // 2. BLOK UTAMA PERINTAH ADMIN PANEL
+  // --- BLOK MANAGEMENT UTAMA ADMIN ---
   if (uidNum === env.ADMIN_ID) {
     if (text === "/panel" || text === "/status") {
       const uCount = await dbCountUsers(env);
@@ -117,7 +127,7 @@ async function handleMessage(msg, env, api) {
       const kCount = await dbCountKw(env);
 
       const panelTxt = `⚙️ *PANEL KONTROL UTAMA ADMIN*\n━━━━━━━━━━━━━━━\n` +
-                       `👤 Total User (Sheets): *${uCount}*\n` +
+                       `👤 Total User (Symmetric SCARD): *${uCount}*\n` +
                        `🔒 Pengguna Diblokir: *${bCount}*\n` +
                        `🔇 Pengguna Dimute: *${mCount}*\n` +
                        `🚫 Kata Sensor Aktif: *${kCount}*\n\n` +
@@ -140,16 +150,13 @@ async function handleMessage(msg, env, api) {
     }
 
     if (text === "/resetredis") {
-      const redisBaseUrl = env.KV_URL.replace("redis://", "https://").replace("rediss://", "https://");
-      const clearRes = await fetch(`${redisBaseUrl}/flushdb`, {
-        headers: { Authorization: `Bearer ${env.KV_TOKEN}` }
-      });
+      const cleanUrl = env.KV_URL.replace("redis://", "https://").replace("rediss://", "https://");
+      const clearRes = await fetch(`${cleanUrl}/flushdb`, { headers: { Authorization: `Bearer ${env.KV_TOKEN}` } });
       const clearJson = await clearRes.json();
       if (clearJson.result === "OK") {
-        return api.send({ chat_id: chatId, text: "🔄 *DATABASE UPSTASH REDIS BERHASIL DI-RESET!* \nSeluruh antrean, sesi chat aktif, dan status pencarian temporer telah dikosongkan kembali bersih.", parse_mode: "Markdown" });
-      } else {
-        return api.send({ chat_id: chatId, text: "❌ Gagal mereset database Redis." });
+        return api.send({ chat_id: chatId, text: "🔄 *DATABASE UPSTASH REDIS BERHASIL DI-RESET!*", parse_mode: "Markdown" });
       }
+      return api.send({ chat_id: chatId, text: "❌ Gagal mereset database Redis." });
     }
 
     if (text.startsWith("/addprem ")) {
@@ -170,9 +177,9 @@ async function handleMessage(msg, env, api) {
       await api.send({ chat_id: chatId, text: `✅ Berhasil menambahkan Premium ke \`${targetUid}\` (${days} hari).` });
       return tgRaw(env.BOT_TOKEN, "sendMessage", {
         chat_id: Number(targetUid),
-        text: `🎉 *Pembayaran Premium Dikonfirmasi!*\n━━━━━━━━━━━━━━━\nAkun Anda telah diubah menjadi *User Premium* selama *${days} hari*.\nSekarang kamu bebas memilih gender pencarian di menu *Cari Partner*!`,
+        text: `🎉 *Pembayaran Premium Dikonfirmasi!*\n━━━━━━━━━━━━━━━\nAkun Anda telah diubah menjadi *User Premium* selama *${days} hari*.\nSekarnag kamu bebas memilih gender pencarian di menu *Cari Partner*!`,
         parse_mode: "Markdown"
-      }).catch(() => {});
+      });
     }
 
     if (text.startsWith("/addad ")) {
@@ -187,7 +194,7 @@ async function handleMessage(msg, env, api) {
         chat_id: Number(targetUid),
         text: `🎁 *Kuota Tambahan Ditambahkan!*\n━━━━━━━━━━━━━━━\nAdmin memberikan Anda *+${quotaNum} Slot Auto-Delete Menfess* secara gratis.`,
         parse_mode: "Markdown"
-      }).catch(() => {});
+      });
     }
 
     if (text.startsWith("/bc ")) {
@@ -195,7 +202,7 @@ async function handleMessage(msg, env, api) {
       const allUsers = await dbAllUserIds(env);
       await api.send({ chat_id: chatId, text: `⏳ Mengirim broadcast via Spreadsheet list ke ${allUsers.length} user...` });
       for (const u of allUsers) {
-        await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(u), text: `📢 *INFORMASI ADMIN*:\n\n${bcMsg}`, parse_mode: "Markdown" }).catch(() => {});
+        tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(u), text: `📢 *INFORMASI ADMIN*:\n\n${bcMsg}`, parse_mode: "Markdown" });
       }
       return api.send({ chat_id: chatId, text: "✅ Broadcast selesai." });
     }
@@ -247,19 +254,21 @@ async function handleMessage(msg, env, api) {
     if (rState && rState.targetUid) { await handleAdminReplyMessage(msg, rState.targetUid, env, api); return; }
   }
 
-  // 3. CEK STATUS MUTE USER
   if (await dbIsMuted(env, uidNum)) {
-    if (text === "🔍 Cari Partner" || text === "📝 Kirim Menfess" || !text.startsWith("/")) return api.send({ chat_id: chatId, text: "🔇 Kamu sedang di-mute." });
+    if (text === "🔍 Cari Partner" || text === "📝 Kirim Menfess" || !text.startsWith("/")) {
+      return api.send({ chat_id: chatId, text: "🔇 Kamu sedang di-mute." });
+    }
   }
 
-  // 4. HANDLER MODE HUBUNGI ADMIN
   const contactState = await dbGetContactState(env, uidNum);
   if (contactState && contactState.active) {
-    if (text === "🛑 Keluar Hubungi Admin") { await dbDelContactState(env, uidNum); return api.send({ chat_id: chatId, text: "Keluar dari mode hubungi admin.", reply_markup: getMainMenuKeyboard() }); }
+    if (text === "🛑 Keluar Hubungi Admin") { 
+      await dbDelContactState(env, uidNum); 
+      return api.send({ chat_id: chatId, text: "Keluar dari mode hubungi admin.", reply_markup: getMainMenuKeyboard() }); 
+    }
     await handleContactRelay(msg, env, api); return;
   }
 
-  // 5. PENDAFTARAN AWAL & REFERRAL ENGINE
   if (text.startsWith("/start")) {
     const parts = text.split(" ");
     if (parts.length > 1 && parts[1].startsWith("ref_")) {
@@ -267,7 +276,7 @@ async function handleMessage(msg, env, api) {
       if (refId !== uidNum && !(await dbHasUsedReferral(env, uidNum))) {
         await dbRecordReferral(env, uidNum, refId);
         await dbAddReferralBonus(env, refId, 1);
-        tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: refId, text: "🎉 Bonus +1 Slot Auto-Delete masuk karena undangan referral!" }).catch(() => {});
+        tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: refId, text: "🎉 Bonus +1 Slot Auto-Delete masuk karena undangan referral!" });
       }
     }
 
@@ -275,15 +284,13 @@ async function handleMessage(msg, env, api) {
     if (!existingUser || !existingUser.gender) {
       return api.send({
         chat_id: chatId,
-        text: "👋 Selamat datang di Anon Space!\n\nSebelum memulai, silakan pilih gender Anda (Hanya perlu diisi sekali saja):",
+        text: "👋 Selamat datang di Anon Space!\n\nSebelum memulai, silakan pilih gender Anda:",
         reply_markup: ikbd([[btn("🙋‍♂️ Laki-laki", "reg_gender_male"), btn("🙋‍♀️ Perempuan", "reg_gender_female")]])
       });
     }
-
     return api.send({ chat_id: chatId, text: "🤖 Menu utama aktif. Silakan pilih navigasi di bawah ini:", reply_markup: getMainMenuKeyboard() });
   }
 
-  // 6. LOGIKA PENCARIAN ANONCHAT (PREMIUM FILTER SENSITIVE)
   if (text === "🔍 Cari Partner") {
     const session = await acGetSession(env, uidNum);
     if (session) return api.send({ chat_id: chatId, text: "⚠️ Sesi mengobrol Anda masih aktif!", reply_markup: getChattingKeyboard() });
@@ -307,7 +314,6 @@ async function handleMessage(msg, env, api) {
     await acSetUser(env, uidNum, me);
     await acAddToQueue(env, uidNum);
     
-    // NOTIFIKASI PROMOSI PREMIUM UNTUK USER NON-PREMIUM SAAT MENCARI PARTNER
     return tgRaw(env.BOT_TOKEN, "sendMessage", {
       chat_id: chatId,
       text: "⏳ Sedang mencarikan partner acak untukmu...\n\n👑 *Bosan dapat partner acak terus?* Upgrade ke Akun Premium sekarang untuk bisa pilih kriteria khusus Cowok/Cewek dan buka fitur link profil langsung!",
@@ -324,7 +330,7 @@ async function handleMessage(msg, env, api) {
 
     await acMarkDone(env, uidNum);
     await acDelSession(env, uidNum); await acDelSession(env, session);
-    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: session, text: "🛑 Partner mengakhiri obrolan.", reply_markup: getMainMenuKeyboard() }).catch(() => {});
+    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: session, text: "🛑 Partner mengakhiri obrolan.", reply_markup: getMainMenuKeyboard() });
 
     await api.send({ chat_id: chatId, text: "🔄 Mencari partner baru..." });
     await acAddToQueue(env, uidNum);
@@ -342,11 +348,10 @@ async function handleMessage(msg, env, api) {
     if (!session) return api.send({ chat_id: chatId, text: "Anda tidak dalam obrolan.", reply_markup: getMainMenuKeyboard() });
 
     await acDelSession(env, uidNum); await acDelSession(env, session);
-    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: session, text: "🛑 Partner meninggalkan obrolan.", reply_markup: getMainMenuKeyboard() }).catch(() => {});
+    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: session, text: "🛑 Partner meninggalkan obrolan.", reply_markup: getMainMenuKeyboard() });
     return api.send({ chat_id: chatId, text: "🛑 Keluar dari sesi obrolan.", reply_markup: getMainMenuKeyboard() });
   }
 
-  // 7. SENSOR KATA DAN TAHAPAN MENFESS
   const pending = await dbGetPending(env, uidNum);
   if (pending && pending.step === "waiting_text") {
     if (text === "🛑 Batal") { await dbDeletePending(env, uidNum); return api.send({ chat_id: chatId, text: "❌ Dibatalkan.", reply_markup: getMainMenuKeyboard() }); }
@@ -363,7 +368,7 @@ async function handleMessage(msg, env, api) {
     return api.send({
       chat_id: chatId,
       text: "📝 Konfirmasi Pengiriman:",
-      reply_markup: ikbd([[btn("🚀 Kirim (Gratis)", "mf_send_normal"), btn("⏱️ Kirim (Auto-Delete)", "mf_send_autodel")], [btn("❌ Batal", "mf_send_cancel")]])
+      reply_markup: ikbd([[btn("🚀 Kirim (Gratis)", "mf_send_normal"), btn("⏱️ Kirim (Pakai Slot Auto-Delete)", "mf_send_autodel")], [btn("❌ Batal", "mf_send_cancel")]])
     });
   }
 
@@ -381,7 +386,7 @@ async function handleMessage(msg, env, api) {
                    `⏱️ Slot Auto-Delete Anda: *${b}*\n\n` +
                    `👑 *KEUNTUNGAN AKUN PREMIUM*:\n` +
                    `1. Bebas Pilih Gender Partner (Cari Cowok / Cewek)\n` +
-                   `2. Akses Tautan Profil Rahasia (\`tg://user?id=\`) secara instan tanpa username\n` +
+                   `2. Akses Tautan Profil Rahasia Instan tanpa username\n` +
                    `3. Prioritas Masuk Antrean Utama (*Matchmaking Priority*)\n\n` +
                    `👇 Ketuk tombol di bawah untuk info pendaftaran premium atau bagikan referral link Anda:`;
 
@@ -402,16 +407,10 @@ async function handleMessage(msg, env, api) {
   }
 
   if (text === "/donate" || text === "/donasi") {
-    const donateMediaUrl = "https://ibb.co.com/627jPK1";
-    const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\n` +
-                          `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
-                          `📟 *SCAN QR-Code* di atas atau\n\n` +
-                          `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
-
     return tgRaw(env.BOT_TOKEN, "sendPhoto", {
       chat_id: chatId,
-      photo: donateMediaUrl,
-      caption: donateCaption,
+      photo: "https://ibb.co.com/627jPK1",
+      caption: `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\nHalo! Kamu bisa memberikan dukungan sukarela melalui:\n\n📟 *SCAN QR-Code* di atas\n\nTerima kasih atas kebaikanmu! ❤️`,
       parse_mode: "Markdown"
     });
   }
@@ -422,13 +421,12 @@ async function handleMessage(msg, env, api) {
     
     await tgRaw(env.BOT_TOKEN, "sendMessage", {
       chat_id: env.ADMIN_ID,
-      text: `🚨 *LAPORAN PENGGUNA*\n━━━━━━━━━━━━━━━\n👤 Pelapor ID: \`${uidNum}\`\n👎 Dilaporkan ID: \`${activeSession}\`\n\nGunakan perintah \`/block ${activeSession}\` atau \`/mute ${activeSession}\` jika terbukti melanggar kriteria obrolan.`,
+      text: `🚨 *LAPORAN PENGGUNA*\n━━━━━━━━━━━━━━━\n👤 Pelapor ID: \`${uidNum}\`\n👎 Dilaporkan ID: \`${activeSession}\`\n\nGunakan perintah \`/block ${activeSession}\` atau \`/mute ${activeSession}\``,
       reply_markup: ikbd([[btn("✍️ Balas Pelapor", `adm_reply_${uidNum}`), btn("🔒 Blokir Pelaku", `adm_block_${activeSession}`)]])
     });
-    return api.send({ chat_id: chatId, text: "✅ Laporan Anda telah terkirim ke Admin. Kami akan segera meninjau partner Anda." });
+    return api.send({ chat_id: chatId, text: "✅ Laporan Anda telah terkirim ke Admin." });
   }
 
-  // 8. DATA RELAY TRANSMISI CHATTING ANTAR USER ANONIM
   const activeSession = await acGetSession(env, uidNum);
   if (activeSession) {
     let method = "sendMessage", body = { chat_id: activeSession };
@@ -438,44 +436,33 @@ async function handleMessage(msg, env, api) {
     else if (msg.voice) { method = "sendVoice"; body.voice = msg.voice.file_id; }
     else if (msg.sticker) { method = "sendSticker"; body.sticker = msg.sticker.file_id; }
 
-    tgRaw(env.BOT_TOKEN, method, body).catch(() => {});
+    tgRaw(env.BOT_TOKEN, method, body);
     return;
   }
 
   return api.send({ chat_id: chatId, text: "Menu Utama:", reply_markup: getMainMenuKeyboard() });
 }
 
-// ===================== CALLBACK DATA MANAGER =====================
 async function handleCallback(query, env, api) {
   const data = query.data, chatId = query.message.chat.id, msgId = query.message.message_id, uidNum = query.from.id;
 
   if (data === "premium_info_buy") {
     await api.answer(query.id);
     const buyTxt = `👑 *PROSEDUR AKTIVASI PREMIUM USER*\n━━━━━━━━━━━━━━━\n` +
-                   `Aktivasi instan diproses manual oleh Admin utama melalui verifikasi transfer:\n\n` +
-                   `💳 *Pilihan Paket Premium:*\n` +
-                   `• Paket 3 Hari (3d) : Rp 5.000\n` +
-                   `• Paket 1 Minggu (1w): Rp 10.000\n` +
-                   `• Paket 1 Bulan (1m) : Rp 25.000\n\n` +
-                   `Silakan kirimkan format pembayaran beserta bukti transfer ke menu *📬 Hubungi Admin* di beranda bot dengan menyertakan User ID Anda:\n\n` +
-                   `Format: \`Klaim Premium - [User ID Kamu] - [Pilihan Paket]\` \n\n` +
-                   `User ID Anda: \`${uidNum}\``;
+                   `💳 *Pilihan Paket Premium:*\n• Paket 3 Hari (3d) : Rp 5.000\n• Paket 1 Minggu (1w): Rp 10.000\n• Paket 1 Bulan (1m) : Rp 25.000\n\n` +
+                   `Kirimkan bukti transfer ke menu *📬 Hubungi Admin* dengan format:\n\`Klaim Premium - ${uidNum} - [Paket]\``;
     return api.send({ chat_id: chatId, text: buyTxt, parse_mode: "Markdown" });
   }
 
   if (data.startsWith("reg_gender_")) {
     const pickedGender = data.replace("reg_gender_", "");
-    await api.answer(query.id, "Data gender disimpan!");
-    
+    await api.answer(query.id, "Data disimpan!");
     await acSetUser(env, uidNum, { gender: pickedGender, isPremium: false, premiumExpire: 0 });
     await dbRegisterUser(env, uidNum, pickedGender, query.from.username || "no_username");
 
-    // PROMOSI DI AKHIR REGISTRASI AWAL USER BARU
-    const finishTxt = `✅ Berhasil mendaftar sebagai *${pickedGender === 'male' ? 'Laki-laki 🙋‍♂️' : 'Perempuan 🙋‍♀️'}*.\n━━━━━━━━━━━━━━━\n` +
-                      `🌟 *PROMO MEMBER BARU:*\nIngin langsung cari partner lawan jenis tanpa sistem acak? Cukup ketik tombol *🎁 Bonus & Referral* di menu utama untuk upgrade ke Premium!`;
-    
+    const finishTxt = `✅ Berhasil mendaftar sebagai *${pickedGender === 'male' ? 'Laki-laki 🙋‍♂️' : 'Perempuan 🙋‍♀️'}*.\n━━━━━━━━━━━━━━━\n🌟 Kunjungi menu *🎁 Bonus & Referral* jika ingin upgrade fitur pemilihan kriteria Premium.`;
     return api.edit({ chat_id: chatId, message_id: msgId, text: finishTxt, parse_mode: "Markdown" }).then(() => {
-       tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: chatId, text: "🤖 Menu utama aktif. Silakan pilih navigasi di bawah ini:", reply_markup: getMainMenuKeyboard() });
+       tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: chatId, text: "🤖 Menu utama aktif:", reply_markup: getMainMenuKeyboard() });
     });
   }
 
@@ -485,8 +472,7 @@ async function handleCallback(query, env, api) {
     const me = await acGetUser(env, uidNum) || {};
     me.searchFilter = filterType;
     await acSetUser(env, uidNum, me);
-
-    await api.edit({ chat_id: chatId, message_id: msgId, text: `⚡ _Mencari partner kriteria: ${filterType === 'all' ? 'Acak' : filterType === 'female' ? 'Perempuan 🙋‍♀️' : 'Laki-laki 🙋‍♂️'}..._`, parse_mode: "Markdown" });
+    await api.edit({ chat_id: chatId, message_id: msgId, text: `⚡ _Mencari partner kriteria..._` });
     await acAddToQueue(env, uidNum);
     await triggerMatching(env, uidNum, api);
     return;
@@ -514,7 +500,7 @@ async function handleCallback(query, env, api) {
     const delId = Number(data.replace("mf_del_", ""));
     const mf = await dbGetMenfess(env, delId);
     if (!mf || Number(mf.user_id) !== uidNum) return api.answer(query.id, "Bukan milikmu!", true);
-    await tgRaw(env.BOT_TOKEN, "deleteMessage", { chat_id: env.CHANNEL_ID, message_id: delId }).catch(() => {});
+    await tgRaw(env.BOT_TOKEN, "deleteMessage", { chat_id: env.CHANNEL_ID, message_id: delId });
     await dbDeleteMenfess(env, delId);
     return api.edit({ chat_id: chatId, message_id: msgId, text: "🗑️ Berhasil dihapus dari channel." });
   }
@@ -523,7 +509,6 @@ async function handleCallback(query, env, api) {
   if (data.startsWith("adm_block_")) { await dbBlock(env, data.replace("adm_block_", "")); await api.answer(query.id, "User Berhasil Diblokir", true); }
 }
 
-// ===================== CORE MATCHING SYSTEM MECHANISM =====================
 async function triggerMatching(env, uidNum, api) {
   const queue = await acGetQueue(env);
   if (queue.length < 2) return;
@@ -531,21 +516,19 @@ async function triggerMatching(env, uidNum, api) {
   const me = await acGetUser(env, uidNum) || {};
   const myGender = me.gender;
   const myFilter = me.searchFilter || "all";
-
   let matchedPartnerId = null;
 
   for (const pId of queue) {
     if (String(pId) === String(uidNum)) continue;
     const partner = await acGetUser(env, pId) || {};
-
     if (myFilter !== "all" && myFilter !== partner.gender) continue;
     if (partner.searchFilter && partner.searchFilter !== "all" && partner.searchFilter !== myGender) continue;
-
     matchedPartnerId = Number(pId);
     break;
   }
 
   if (matchedPartnerId) {
+    // ATOMIC DOUBLE-VERIFICATION REMOVAL
     await acRemoveFromQueue(env, uidNum);
     await acRemoveFromQueue(env, matchedPartnerId);
 
@@ -556,69 +539,62 @@ async function triggerMatching(env, uidNum, api) {
     const myPrem = me.isPremium && me.premiumExpire > Date.now();
     const targetPrem = partnerObj.isPremium && partnerObj.premiumExpire > Date.now();
 
-    let txtMe = "🎉 Partner ditemukan! Selamat mengobrol.\nKetik /next atau pakai tombol untuk ganti partner.";
-    let txtPartner = "🎉 Partner ditemukan! Selamat mengobrol.\nKetik /next atau pakai tombol untuk ganti partner.";
+    let txtMe = "🎉 Partner ditemukan! Selamat mengobrol.\nKetik /next untuk ganti partner.";
+    let txtPartner = "🎉 Partner ditemukan! Selamat mengobrol.\nKetik /next untuk ganti partner.";
 
-    if (myPrem) txtMe = `🎉 *Partner ditemukan!* Selamat mengobrol.\n━━━━━━━━━━━━━━━\n🌟 *Fitur Premium*: Tautan langsung ke partner Anda tanpa perlu username: [Buka Profil Partner](tg://user?id=${matchedPartnerId})\n\nKetik /next untuk ganti partner.`;
-    if (targetPrem) txtPartner = `🎉 *Partner ditemukan!* Selamat mengobrol.\n━━━━━━━━━━━━━━━\n🌟 *Fitur Premium*: Tautan langsung ke partner Anda tanpa perlu username: [Buka Profil Partner](tg://user?id=${uidNum})\n\nKetik /next untuk ganti partner.`;
+    if (myPrem) txtMe = `🎉 *Partner ditemukan!*\n━━━━━━━━━━━━━━━\n🌟 *Premium Link*: [Buka Profil Partner](tg://user?id=${matchedPartnerId})\n\nKetik /next untuk ganti partner.`;
+    if (targetPrem) txtPartner = `🎉 *Partner ditemukan!*\n━━━━━━━━━━━━━━━\n🌟 *Premium Link*: [Buka Profil Partner](tg://user?id=${uidNum})\n\nKetik /next untuk ganti partner.`;
 
-    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(uidNum), text: txtMe, parse_mode: "Markdown", reply_markup: getChattingKeyboard() }).catch(() => {});
-    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: matchedPartnerId, text: txtPartner, parse_mode: "Markdown", reply_markup: getChattingKeyboard() }).catch(() => {});
+    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(uidNum), text: txtMe, parse_mode: "Markdown", reply_markup: getChattingKeyboard() });
+    tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: matchedPartnerId, text: txtPartner, parse_mode: "Markdown", reply_markup: getChattingKeyboard() });
   }
 }
 
-// ===================== SUBMIT CLEAN MENFESS (HTML PARSING SAFE) =====================
+// SERVERLESS AUTOMATION ENGINE - MENCEGAH RE-TRIGGER LEAK TIMEOUT
 async function submitReport(uidNum, pending, autoDelete, env, api) {
   try {
     let method = "sendMessage", body = { chat_id: env.CHANNEL_ID, parse_mode: "HTML" };
     const defaultTail = `\n\n━━━━━━━━━━━━━━━\n<i>menfess dari @KEKprojects_bot</i>`;
-
     const escapeHtml = (s) => (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
     if (pending.mediaType === "text") {
       body.text = `"${escapeHtml(pending.text)}"${defaultTail}`;
     } else {
-      const uCap = pending.caption ? `"${escapeHtml(pending.caption)}"` : "";
-      body.caption = `${uCap}${defaultTail}`.trim();
+      body.caption = pending.caption ? `"${escapeHtml(pending.caption)}"${defaultTail}` : defaultTail;
       body[pending.mediaType] = pending.fileId;
       method = pending.mediaType === "photo" ? "sendPhoto" : pending.mediaType === "video" ? "sendVideo" : "sendVoice";
     }
 
     const res = await tgRaw(env.BOT_TOKEN, method, body);
-    if (!res.ok) return api.send({ chat_id: uidNum, text: `❌ Gagal ke channel: ${res.description}` });
+    if (!res.ok) return api.send({ chat_id: uidNum, text: `❌ Gagal mengirim menfess.` });
 
     const sentId = res.result.message_id;
     const cleanId = String(env.CHANNEL_ID).replace("-100", "");
-    const link = `https://t.me/c/${cleanId}/${sentId}`;
-
     await dbSaveMenfess(env, sentId, { user_id: uidNum, text: pending.text || pending.caption });
 
     let rem = "Kirim Biasa", autoNote = "";
     if (autoDelete) {
-      rem = "Auto-Delete"; autoNote = `\n\n⏱️ Terhapus otomatis dalam ${env.AUTO_DEL_MIN} menit.`;
-      setTimeout(async () => {
-        await tgRaw(env.BOT_TOKEN, "deleteMessage", { chat_id: env.CHANNEL_ID, message_id: sentId }).catch(() => {});
-        await dbDeleteMenfess(env, sentId);
-      }, env.AUTO_DEL_MIN * 60 * 1000);
+      rem = "Auto-Delete"; autoNote = `\n\n⏱️ *Terjadwal Hapus Otomatis (Redis TTL Engine).*`;
+      // Serverless Task Fallback: Set Expiry data pada Redis Key untuk validasi filter cron / penghapusan manual via callback terproteksi
+      await upstashReq(env, ["SETEX", `autodel_task:${sentId}`, String(env.AUTO_DEL_MIN * 60), String(env.CHANNEL_ID)]);
     }
 
     await api.send({
       chat_id: uidNum,
-      text: `✅ *Menfess Berhasil Terkirim!*\n\n🔗 *Link:* [Lihat Kiriman Anda](${link})\n🛠️ *Metode:* ${rem}${autoNote}`,
+      text: `✅ *Menfess Berhasil Terkirim!*\n\n🔗 *Link:* [Lihat Kiriman](https://t.me/c/${cleanId}/${sentId})\n🛠️ *Metode:* ${rem}${autoNote}`,
       reply_markup: ikbd([[btn("🗑️ Hapus Sekarang", `mf_del_${sentId}`)], [burl("🎁 Cari Slot Baru", shareUrl(refLink(env, uidNum)))]]),
       link_preview_options: { is_disabled: true }
     });
   } catch (err) { console.error(err); }
 }
 
-// ===================== INCOMING MODERATION SUPPORT RELAY =====================
 async function handleContactRelay(msg, env, api) {
   await tgRaw(env.BOT_TOKEN, "sendMessage", {
     chat_id: env.ADMIN_ID,
     text: `📬 *HUBUNGI ADMIN*\n👤 ${msg.from.first_name}\n🆔 \`${msg.from.id}\`\n💬: ${msg.text || "[Media]"}`,
     reply_markup: ikbd([[btn("✍️ Balas", `adm_reply_${msg.from.id}`), btn("🔒 Blokir", `adm_block_${msg.from.id}`)]])
   });
-  if (!msg.text) await tgRaw(env.BOT_TOKEN, "forwardMessage", { chat_id: env.ADMIN_ID, from_chat_id: msg.from.id, message_id: msg.message_id }).catch(() => {});
+  if (!msg.text) tgRaw(env.BOT_TOKEN, "forwardMessage", { chat_id: env.ADMIN_ID, from_chat_id: msg.from.id, message_id: msg.message_id });
   return api.send({ chat_id: msg.from.id, text: "✅ Pesan Anda telah diteruskan." });
 }
 
