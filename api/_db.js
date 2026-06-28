@@ -6,8 +6,7 @@
 
 // api/_db.js — Hybrid Database Layer (Redis + Google Sheets)
 
-// Memory Cache untuk Blacklist Keyword guna menghindari Latency Google Sheets
-let cacheKeywords = { data: [], expires: 0 };
+// Memory Cache untuk Blacklist Keyword guna menghindari Latency Google Sheetslet cacheKeywords = { data: [], expires: 0 };
 
 async function upstashReq(env, command) {
   try {
@@ -23,14 +22,13 @@ async function upstashReq(env, command) {
   }
 }
 
-// Safe JSON Parser Utility
 function safeJsonParse(str) {
   if (!str) return null;
   try { return JSON.parse(str); } 
   catch (e) { console.error("[Corrupted State JSON Detected]:", str); return null; }
 }
 
-// === GOOGLE SPREADSHEET BACKEND PERSISTENCE BRIDGE ===
+// === GOOGLE SPREADSHEET BRIDGE PERSISTENCE ENGINE ===
 async function syncToSpreadsheet(env, payload) {
   if (!env.SPREADSHEET_API_URL) return false;
   try {
@@ -44,12 +42,12 @@ async function syncToSpreadsheet(env, payload) {
     const parsed = JSON.parse(cleanText);
     return parsed.status === "success" || parsed.ok;
   } catch (err) {
-    console.error("[Spreadsheet Sync Failed, Falling Back to Redis Only]:", err.message);
+    console.error("[Spreadsheet Sync Failed]:", err.message);
     return false;
   }
 }
 
-// === USER REGISTRY & DATA MANAGEMENT ===
+// === USER REGISTRY MANAGEMENT ===
 export async function acGetUser(env, uid) {
   const r = await upstashReq(env, ["GET", `user:${uid}`]);
   return safeJsonParse(r.result);
@@ -63,8 +61,9 @@ export async function dbRegisterUser(env, uid, gender, username) {
   const userObj = { uid, gender, username, isPremium: false, premiumExpire: 0, registeredAt: Date.now() };
   await acSetUser(env, uid, userObj);
   await upstashReq(env, ["SADD", "global_users_cache", String(uid)]);
-  // Sinkronisasi non-blocking ke Spreadsheet untuk mengamankan registry user
-  syncToSpreadsheet(env, { action: "register", uid, gender, username }).catch(() => {});
+  
+  // SPREADSHEET AKTIF MUTLAK: Mengirimkan data registrasi utama pengguna
+  await syncToSpreadsheet(env, { action: "register", uid, gender, username });
 }
 
 export async function dbAllUserIds(env) {
@@ -77,7 +76,7 @@ export async function dbCountUsers(env) {
   return r.result || 0;
 }
 
-// === ANTI-RACE CONDITION ATOMIC MATCHMAKING QUEUE (CRITICAL P0) ===
+// === ANTI-RACE CONDITION ATOMIC MATCHMAKING QUEUE ===
 export async function acAddToQueue(env, uid) {
   await upstashReq(env, ["SADD", "chat_queue", String(uid)]);
 }
@@ -91,15 +90,12 @@ export async function acGetQueue(env) {
   return r.result || [];
 }
 
-// Menggunakan operasi atomik SPOP untuk mengeluarkan user dari antrean secara aman tanpa tumpang tindih
 export async function acPopRandomPartner(env, myUid) {
-  // Ambil 1 kandidat dari antrean menggunakan SPOP (menjamin atomisitas tingkat tinggi)
   const r = await upstashReq(env, ["SPOP", "chat_queue"]);
   const matchedUid = r.result;
   if (!matchedUid) return null;
   
   if (String(matchedUid) === String(myUid)) {
-    // Jika tidak sengaja mengambil diri sendiri, masukkan kembali ke antrean
     await acAddToQueue(env, myUid);
     return null;
   }
@@ -126,10 +122,10 @@ export async function acIsDone(env, uid) {
 }
 
 export async function acMarkDone(env, uid) {
-  await upstashReq(env, ["SETEX", `lock:${uid}`, "2", "1"]); // Lock cooldown 2 detik
+  await upstashReq(env, ["SETEX", `lock:${uid}`, "2", "1"]);
 }
 
-// === MODERATION COMPONENT (REAL-TIME STATE) ===
+// === MODERATION STATE LAYER ===
 export async function dbIsBlocked(env, uid) { return (await upstashReq(env, ["SISMEMBER", "blocked", String(uid)])).result === 1; }
 export async function dbBlock(env, uid) { await upstashReq(env, ["SADD", "blocked", String(uid)]); }
 export async function dbUnblock(env, uid) { await upstashReq(env, ["SREM", "blocked", String(uid)]); }
@@ -146,7 +142,7 @@ export async function dbListKw(env) {
   if (Date.now() < cacheKeywords.expires) return cacheKeywords.data;
   const r = await upstashReq(env, ["SMEMBERS", "keywords"]);
   cacheKeywords.data = r.result || [];
-  cacheKeywords.expires = Date.now() + 60000; // Cache memori lokal 1 menit
+  cacheKeywords.expires = Date.now() + 60000;
   return cacheKeywords.data;
 }
 export async function dbCountKw(env) { return (await upstashReq(env, ["SCARD", "keywords"])).result || 0; }
@@ -174,7 +170,6 @@ export async function dbUseReferralBonus(env, uid) {
 }
 export async function dbHasUsedReferral(env, uid) { return (await upstashReq(env, ["SISMEMBER", "used_referrals", String(uid)])).result === 1; }
 export async function dbRecordReferral(env, uid, refId) {
-  // Transaksi penguncian gabungan di level Redis Set
   await upstashReq(env, ["SADD", "used_referrals", String(uid)]);
   await upstashReq(env, ["SADD", `user_referrals:${refId}`, String(uid)]);
 }
