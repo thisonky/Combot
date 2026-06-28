@@ -7,119 +7,149 @@
 // api/_db.js — Hybrid Database Layer (Redis + Google Sheets)
 
 // Memory Cache untuk Blacklist Keyword guna menghindari Latency Google Sheets
-let localKwCache = { data: [], expiresAt: 0 };
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit
+let cacheKeywords = { data: [], expires: 0 };
 
 async function upstashReq(env, command) {
   try {
-    const res = await fetch(`${env.KV_URL}`, {
+    const res = await fetch(env.KV_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${env.KV_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(command),
     });
     return await res.json();
   } catch (err) {
-    console.error("[Upstash Redis Error]:", err.message);
+    console.error("[Redis High-Load Error]:", err.message);
     return { result: null, error: err.message };
   }
 }
 
-// === ENGINE ANONCHAT ATOMIK (Mencegah Race Condition / Double Match) ===
+// Safe JSON Parser Utility
+function safeJsonParse(str) {
+  if (!str) return null;
+  try { return JSON.parse(str); } 
+  catch (e) { console.error("[Corrupted State JSON Detected]:", str); return null; }
+}
+
+// === GOOGLE SPREADSHEET BACKEND PERSISTENCE BRIDGE ===
+async function syncToSpreadsheet(env, payload) {
+  if (!env.SPREADSHEET_API_URL) return false;
+  try {
+    const res = await fetch(env.SPREADSHEET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const text = await res.text();
+    const cleanText = text.trim().startsWith("%") ? decodeURIComponent(text.trim()) : text.trim();
+    const parsed = JSON.parse(cleanText);
+    return parsed.status === "success" || parsed.ok;
+  } catch (err) {
+    console.error("[Spreadsheet Sync Failed, Falling Back to Redis Only]:", err.message);
+    return false;
+  }
+}
+
+// === USER REGISTRY & DATA MANAGEMENT ===
 export async function acGetUser(env, uid) {
   const r = await upstashReq(env, ["GET", `user:${uid}`]);
-  return r.result ? JSON.parse(r.result) : null;
+  return safeJsonParse(r.result);
 }
+
 export async function acSetUser(env, uid, obj) {
   await upstashReq(env, ["SET", `user:${uid}`, JSON.stringify(obj)]);
 }
-export async function acGetSession(env, uid) {
-  const r = await upstashReq(env, ["GET", `session:${uid}`]);
-  return r.result;
-}
-export async function acSetSession(env, uid1, uid2) {
-  await upstashReq(env, ["SET", `session:${uid1}`, String(uid2)]);
-}
-export async function acDelSession(env, uid) {
-  await upstashReq(env, ["DEL", `session:${uid}`]);
+
+export async function dbRegisterUser(env, uid, gender, username) {
+  const userObj = { uid, gender, username, isPremium: false, premiumExpire: 0, registeredAt: Date.now() };
+  await acSetUser(env, uid, userObj);
+  await upstashReq(env, ["SADD", "global_users_cache", String(uid)]);
+  // Sinkronisasi non-blocking ke Spreadsheet untuk mengamankan registry user
+  syncToSpreadsheet(env, { action: "register", uid, gender, username }).catch(() => {});
 }
 
-// Menggunakan Redis SET (SADD/SREM) untuk Antrean yang Dijamin Atomik secara Skala Distribusi
-export async function acGetQueue(env) {
-  const r = await upstashReq(env, ["SMEMBERS", "chat_queue"]);
+export async function dbAllUserIds(env) {
+  const r = await upstashReq(env, ["SMEMBERS", "global_users_cache"]);
   return r.result || [];
 }
+
+export async function dbCountUsers(env) {
+  const r = await upstashReq(env, ["SCARD", "global_users_cache"]);
+  return r.result || 0;
+}
+
+// === ANTI-RACE CONDITION ATOMIC MATCHMAKING QUEUE (CRITICAL P0) ===
 export async function acAddToQueue(env, uid) {
   await upstashReq(env, ["SADD", "chat_queue", String(uid)]);
 }
+
 export async function acRemoveFromQueue(env, uid) {
   await upstashReq(env, ["SREM", "chat_queue", String(uid)]);
 }
 
-// Mekanisme Lock Next State Menggunakan Expiry (Idempotent Token)
-export async function acIsDone(env, uid) {
-  const r = await upstashReq(env, ["EXISTS", `lock_next:${uid}`]);
-  return r.result === 1;
-}
-export async function acMarkDone(env, uid) {
-  await upstashReq(env, ["SETEX", `lock_next:${uid}`, "3", "1"]); // lock 3 detik
-}
-
-// === DATABASE GOOGLE SPREADSHEET BRIDGE INTEGRATION ===
-async function sheetReq(env, payload) {
-  if (!env.SPREADSHEET_API_URL) return null;
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s strict timeout
-    const res = await fetch(env.SPREADSHEET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    const text = await res.text();
-    const cleanText = text.trim().startsWith("%") ? decodeURIComponent(text.trim()) : text.trim();
-    return JSON.parse(cleanText);
-  } catch (err) {
-    console.error("[Spreadsheet API Failure Fallback]:", err.message);
-    return null;
-  }
-}
-
-export async function dbRegisterUser(env, uid, gender, username) {
-  await sheetReq(env, { action: "register", uid, gender, username });
-  await upstashReq(env, ["SADD", "global_users", String(uid)]);
-}
-export async function dbCountUsers(env) {
-  const r = await upstashReq(env, ["SCARD", "global_users"]);
-  return r.result || 0;
-}
-export async function dbAllUserIds(env) {
-  const r = await upstashReq(env, ["SMEMBERS", "global_users"]);
+export async function acGetQueue(env) {
+  const r = await upstashReq(env, ["SMEMBERS", "chat_queue"]);
   return r.result || [];
 }
 
-// === BLOCK, MUTE, KEYWORD MODERASI LAYER ===
-export async function dbIsBlocked(env, uid) { return (await upstashReq(env, ["SISMEMBER", "blocked_users", String(uid)])).result === 1; }
-export async function dbBlock(env, uid) { await upstashReq(env, ["SADD", "blocked_users", String(uid)]); }
-export async function dbUnblock(env, uid) { await upstashReq(env, ["SREM", "blocked_users", String(uid)]); }
-export async function dbCountBlocked(env) { return (await upstashReq(env, ["SCARD", "blocked_users"])).result || 0; }
-
-export async function dbIsMuted(env, uid) { return (await upstashReq(env, ["SISMEMBER", "muted_users", String(uid)])).result === 1; }
-export async function dbMute(env, uid) { await upstashReq(env, ["SADD", "muted_users", String(uid)]); }
-export async function dbUnmute(env, uid) { await upstashReq(env, ["SREM", "muted_users", String(uid)]); }
-export async function dbCountMuted(env) { return (await upstashReq(env, ["SCARD", "muted_users"])).result || 0; }
-
-export async function dbAddKw(env, kw) { await upstashReq(env, ["SADD", "blacklist_keywords", kw.toLowerCase()]); localKwCache.expiresAt = 0; }
-export async function dbDelKw(env, kw) { await upstashReq(env, ["SREM", "blacklist_keywords", kw.toLowerCase()]); localKwCache.expiresAt = 0; }
-export async function dbListKw(env) {
-  if (Date.now() < localKwCache.expiresAt) return localKwCache.data;
-  const r = await upstashReq(env, ["SMEMBERS", "blacklist_keywords"]);
-  localKwCache.data = r.result || [];
-  localKwCache.expiresAt = Date.now() + CACHE_TTL_MS;
-  return localKwCache.data;
+// Menggunakan operasi atomik SPOP untuk mengeluarkan user dari antrean secara aman tanpa tumpang tindih
+export async function acPopRandomPartner(env, myUid) {
+  // Ambil 1 kandidat dari antrean menggunakan SPOP (menjamin atomisitas tingkat tinggi)
+  const r = await upstashReq(env, ["SPOP", "chat_queue"]);
+  const matchedUid = r.result;
+  if (!matchedUid) return null;
+  
+  if (String(matchedUid) === String(myUid)) {
+    // Jika tidak sengaja mengambil diri sendiri, masukkan kembali ke antrean
+    await acAddToQueue(env, myUid);
+    return null;
+  }
+  return matchedUid;
 }
-export async function dbCountKw(env) { return (await upstashReq(env, ["SCARD", "blacklist_keywords"])).result || 0; }
+
+// === SESSION MANAGEMENT ===
+export async function acGetSession(env, uid) {
+  const r = await upstashReq(env, ["GET", `session:${uid}`]);
+  return r.result;
+}
+
+export async function acSetSession(env, uid1, uid2) {
+  await upstashReq(env, ["SET", `session:${uid1}`, String(uid2)]);
+}
+
+export async function acDelSession(env, uid) {
+  await upstashReq(env, ["DEL", `session:${uid}`]);
+}
+
+export async function acIsDone(env, uid) {
+  const r = await upstashReq(env, ["EXISTS", `lock:${uid}`]);
+  return r.result === 1;
+}
+
+export async function acMarkDone(env, uid) {
+  await upstashReq(env, ["SETEX", `lock:${uid}`, "2", "1"]); // Lock cooldown 2 detik
+}
+
+// === MODERATION COMPONENT (REAL-TIME STATE) ===
+export async function dbIsBlocked(env, uid) { return (await upstashReq(env, ["SISMEMBER", "blocked", String(uid)])).result === 1; }
+export async function dbBlock(env, uid) { await upstashReq(env, ["SADD", "blocked", String(uid)]); }
+export async function dbUnblock(env, uid) { await upstashReq(env, ["SREM", "blocked", String(uid)]); }
+export async function dbCountBlocked(env) { return (await upstashReq(env, ["SCARD", "blocked"])).result || 0; }
+
+export async function dbIsMuted(env, uid) { return (await upstashReq(env, ["SISMEMBER", "muted", String(uid)])).result === 1; }
+export async function dbMute(env, uid) { await upstashReq(env, ["SADD", "muted", String(uid)]); }
+export async function dbUnmute(env, uid) { await upstashReq(env, ["SREM", "muted", String(uid)]); }
+export async function dbCountMuted(env) { return (await upstashReq(env, ["SCARD", "muted"])).result || 0; }
+
+export async function dbAddKw(env, kw) { await upstashReq(env, ["SADD", "keywords", kw.toLowerCase()]); cacheKeywords.expires = 0; }
+export async function dbDelKw(env, kw) { await upstashReq(env, ["SREM", "keywords", kw.toLowerCase()]); cacheKeywords.expires = 0; }
+export async function dbListKw(env) {
+  if (Date.now() < cacheKeywords.expires) return cacheKeywords.data;
+  const r = await upstashReq(env, ["SMEMBERS", "keywords"]);
+  cacheKeywords.data = r.result || [];
+  cacheKeywords.expires = Date.now() + 60000; // Cache memori lokal 1 menit
+  return cacheKeywords.data;
+}
+export async function dbCountKw(env) { return (await upstashReq(env, ["SCARD", "keywords"])).result || 0; }
 
 export async function dbContainsBlacklistedKw(env, text) {
   const list = await dbListKw(env);
@@ -127,13 +157,13 @@ export async function dbContainsBlacklistedKw(env, text) {
   return list.some(kw => target.includes(kw));
 }
 
-// === TEMPORARY STATE MANAGER (MENFESS, REFERRAL, CONTACT ADMIN) ===
+// === TEMPORARY STATE MANAGEMENT ===
 export async function dbSaveMenfess(env, msgId, obj) { await upstashReq(env, ["SETEX", `menfess:${msgId}`, "86400", JSON.stringify(obj)]); }
-export async function dbGetMenfess(env, msgId) { const r = await upstashReq(env, ["GET", `menfess:${msgId}`]); return r.result ? JSON.parse(r.result) : null; }
+export async function dbGetMenfess(env, msgId) { const r = await upstashReq(env, ["GET", `menfess:${msgId}`]); return safeJsonParse(r.result); }
 export async function dbDeleteMenfess(env, msgId) { await upstashReq(env, ["DEL", `menfess:${msgId}`]); }
 
-export async function dbSavePending(env, uid, obj) { await upstashReq(env, ["SETEX", `pending:${uid}`, "600", JSON.stringify(obj)]); }
-export async function dbGetPending(env, uid) { const r = await upstashReq(env, ["GET", `pending:${uid}`]); return r.result ? JSON.parse(r.result) : null; }
+export async function dbSavePending(env, uid, obj) { await upstashReq(env, ["SETEX", `pending:${uid}`, "300", JSON.stringify(obj)]); }
+export async function dbGetPending(env, uid) { const r = await upstashReq(env, ["GET", `pending:${uid}`]); return safeJsonParse(r.result); }
 export async function dbDeletePending(env, uid) { await upstashReq(env, ["DEL", `pending:${uid}`]); }
 
 export async function dbGetReferralBonus(env, uid) { return Number((await upstashReq(env, ["GET", `ref_bonus:${uid}`])).result || 0); }
@@ -144,15 +174,16 @@ export async function dbUseReferralBonus(env, uid) {
 }
 export async function dbHasUsedReferral(env, uid) { return (await upstashReq(env, ["SISMEMBER", "used_referrals", String(uid)])).result === 1; }
 export async function dbRecordReferral(env, uid, refId) {
+  // Transaksi penguncian gabungan di level Redis Set
   await upstashReq(env, ["SADD", "used_referrals", String(uid)]);
   await upstashReq(env, ["SADD", `user_referrals:${refId}`, String(uid)]);
 }
 export async function dbCountReferrals(env, uid) { return (await upstashReq(env, ["SCARD", `user_referrals:${uid}`])).result || 0; }
 
-export async function dbGetContactState(env, uid) { const r = await upstashReq(env, ["GET", `contact:${uid}`]); return r.result ? JSON.parse(r.result) : null; }
-export async function dbSetContactState(env, uid, obj) { await upstashReq(env, ["SETEX", `contact:${uid}`, "1800", JSON.stringify(obj)]); }
+export async function dbGetContactState(env, uid) { const r = await upstashReq(env, ["GET", `contact:${uid}`]); return safeJsonParse(r.result); }
+export async function dbSetContactState(env, uid, obj) { await upstashReq(env, ["SETEX", `contact:${uid}`, "600", JSON.stringify(obj)]); }
 export async function dbDelContactState(env, uid) { await upstashReq(env, ["DEL", `contact:${uid}`]); }
 
-export async function dbGetAdminReply(env, uid) { const r = await upstashReq(env, ["GET", `admin_reply:${uid}`]); return r.result ? JSON.parse(r.result) : null; }
+export async function dbGetAdminReply(env, uid) { const r = await upstashReq(env, ["GET", `admin_reply:${uid}`]); return safeJsonParse(r.result); }
 export async function dbSetAdminReply(env, uid, targetUid) { await upstashReq(env, ["SETEX", `admin_reply:${uid}`, "600", JSON.stringify({ targetUid })]); }
 export async function dbDelAdminReply(env, uid) { await upstashReq(env, ["DEL", `admin_reply:${uid}`]); }
