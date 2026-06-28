@@ -7,6 +7,7 @@
 // api/_db.js — Hybrid Database Layer (Redis + Google Sheets)
 
 // Memory Cache untuk Blacklist Keyword guna menghindari Latency Google Sheetslet cacheKeywords = { data: [], expires: 0 };
+let cacheKeywords = { data: [], expires: 0 };
 
 async function upstashReq(env, command) {
   try {
@@ -29,7 +30,7 @@ function safeJsonParse(str) {
 }
 
 // === GOOGLE SPREADSHEET BRIDGE PERSISTENCE ENGINE ===
-async function syncToSpreadsheet(env, payload) {
+export async function syncToSpreadsheet(env, payload) {
   if (!env.SPREADSHEET_API_URL) return false;
   try {
     const res = await fetch(env.SPREADSHEET_API_URL, {
@@ -58,12 +59,29 @@ export async function acSetUser(env, uid, obj) {
 }
 
 export async function dbRegisterUser(env, uid, gender, username) {
-  const userObj = { uid, gender, username, isPremium: false, premiumExpire: 0, registeredAt: Date.now() };
+  const registeredAt = new Date().toISOString();
+  const userObj = { 
+    uid: Number(uid), 
+    gender: gender, 
+    username: username || "no_username", 
+    isPremium: false, 
+    premiumExpire: 0, 
+    searchFilter: "all",
+    registeredAt: registeredAt 
+  };
+  
+  // 1. Simpan di cache Redis untuk operasional cepat chatbot
   await acSetUser(env, uid, userObj);
   await upstashReq(env, ["SADD", "global_users_cache", String(uid)]);
   
-  // SPREADSHEET AKTIF MUTLAK: Mengirimkan data registrasi utama pengguna
-  await syncToSpreadsheet(env, { action: "register", uid, gender, username });
+  // 2. SINKRONISASI MUTLAK: Kirim data registrasi lengkap ke Google Spreadsheet
+  await syncToSpreadsheet(env, { 
+    action: "register", 
+    uid: Number(uid), 
+    gender: gender, 
+    username: username || "no_username",
+    registeredAt: registeredAt
+  });
 }
 
 export async function dbAllUserIds(env) {
