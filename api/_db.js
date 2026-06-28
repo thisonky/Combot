@@ -4,118 +4,148 @@
 // ── Redis core ──
 // api/_db.js — Upstash Redis via HTTP (Clean Version tanpa Statistik Berat)
 
-async function redisCmd(env, ...args) {
-  try {
-    const res = await fetch(env.KV_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.KV_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(args),
-    });
-    const data = await res.json();
-    return data?.result ?? null;
-  } catch (e) {
-    console.error("redisCmd error:", e.message);
-    return null;
-  }
+// api/_db.js — Hybrid Database Layer (Redis + Google Sheets)
+
+// --- FUNGSI MURNI REDIS (Untuk Data Real-time & Sesi Chatting) ---
+async function redisRaw(env, cmd, ...args) {
+  const r = await fetch(`${env.KV_URL}/${cmd}/${args.map(encodeURIComponent).join("/")}`, {
+    headers: { Authorization: `Bearer ${env.KV_TOKEN}` }
+  });
+  return r.json();
 }
 
-async function redisGet(env, key) {
-  const result = await redisCmd(env, "GET", key);
-  if (result === null) return null;
-  try { return JSON.parse(result); } catch { return result; }
+export async function acGetUser(env, uid) {
+  const res = await redisRaw(env, "get", `user:${uid}`);
+  return res.result ? JSON.parse(res.result) : null;
 }
 
-async function redisSet(env, key, value, exSeconds) {
-  const val = typeof value === "string" ? value : JSON.stringify(value);
-  if (exSeconds) {
-    await redisCmd(env, "SET", key, val, "EX", exSeconds);
-  } else {
-    await redisCmd(env, "SET", key, val);
-  }
+export async function acSetUser(env, uid, obj) {
+  await redisRaw(env, "set", `user:${uid}`, JSON.stringify(obj));
 }
 
-async function redisDel(env, key) {
-  await redisCmd(env, "DEL", key);
+export async function acGetSession(env, uid) {
+  const res = await redisRaw(env, "get", `sess:${uid}`);
+  return res.result || null;
 }
 
-// ── Anonymous Chat ──
-export async function acGetUser(env, uid) { return redisGet(env, `ac_user:${uid}`); }
-export async function acSetUser(env, uid, data) { await redisSet(env, `ac_user:${uid}`, data); }
-export async function acGetSession(env, uid) { return redisGet(env, `ac_sess:${uid}`); }
-export async function acSetSession(env, uid, partnerId) { await redisSet(env, `ac_sess:${uid}`, String(partnerId)); }
-export async function acDelSession(env, uid) { await redisDel(env, `ac_sess:${uid}`); }
-export async function acGetQueue(env) { return await redisCmd(env, "LRANGE", "ac_queue", 0, -1) || []; }
-export async function acAddToQueue(env, uid) { await redisCmd(env, "RPUSH", "ac_queue", String(uid)); }
-export async function acRemoveFromQueue(env, uid) { await redisCmd(env, "LREM", "ac_queue", 0, String(uid)); }
-export async function acPickPartner(env, uid) {
-  const queue = await acGetQueue(env);
-  const filtered = queue.filter(id => String(id) !== String(uid));
-  if (filtered.length === 0) return null;
-  const partnerId = filtered[0];
-  await acRemoveFromQueue(env, partnerId);
-  return String(partnerId);
+export async function acSetSession(env, uid, targetUid) {
+  await redisRaw(env, "set", `sess:${uid}`, String(targetUid));
 }
-export async function acIsDone(env, uid) { return !!(await redisCmd(env, "EXISTS", `ac_done:${uid}`)); }
-export async function acMarkDone(env, uid) { await redisSet(env, `ac_done:${uid}`, "1", 5); }
 
-// ── General DB & Admin ──
-export async function dbRegisterUser(env, uid) { await redisCmd(env, "SADD", "all_users", String(uid)); }
-export async function dbCountUsers(env) { return Number(await redisCmd(env, "SCARD", "all_users")) || 0; }
-export async function dbAllUserIds(env) { return await redisCmd(env, "SMEMBERS", "all_users") || []; }
+export async function acDelSession(env, uid) {
+  await redisRaw(env, "del", `sess:${uid}`);
+}
 
-export async function dbIsBlocked(env, uid) { return !!(await redisCmd(env, "SISMEMBER", "blocked_users", String(uid))); }
-export async function dbBlock(env, uid) { await redisCmd(env, "SADD", "blocked_users", String(uid)); }
-export async function dbUnblock(env, uid) { await redisCmd(env, "SREM", "blocked_users", String(uid)); }
-export async function dbListBlocked(env) { return await redisCmd(env, "SMEMBERS", "blocked_users") || []; }
-export async function dbCountBlocked(env) { return Number(await redisCmd(env, "SCARD", "blocked_users")) || 0; }
+export async function acGetQueue(env) {
+  const res = await redisRaw(env, "lrange", "chat_queue", "0", "-1");
+  return res.result || [];
+}
 
-export async function dbIsMuted(env, uid) { return !!(await redisCmd(env, "SISMEMBER", "muted_users", String(uid))); }
-export async function dbMute(env, uid) { await redisCmd(env, "SADD", "muted_users", String(uid)); }
-export async function dbUnmute(env, uid) { await redisCmd(env, "SREM", "muted_users", String(uid)); }
-export async function dbCountMuted(env) { return Number(await redisCmd(env, "SCARD", "muted_users")) || 0; }
+export async function acAddToQueue(env, uid) {
+  await acRemoveFromQueue(env, uid); // Hindari duplikat di antrean
+  await redisRaw(env, "rpush", "chat_queue", String(uid));
+}
 
+export async function acRemoveFromQueue(env, uid) {
+  await redisRaw(env, "lrem", "chat_queue", "0", String(uid));
+}
+
+export async function acIsDone(env, uid) {
+  const res = await redisRaw(env, "exists", `cooldown:${uid}`);
+  return res.result === 1;
+}
+
+export async function acMarkDone(env, uid) {
+  await redisRaw(env, "set", `cooldown:${uid}`, "1", "EX", "5");
+}
+
+// --- FUNGSI PRIVILEGE ADMIN (Mute / Block di Redis) ---
+export async function dbIsBlocked(env, uid)  { const r = await redisRaw(env, "sismember", "blocked_users", String(uid)); return r.result === 1; }
+export async function dbBlock(env, uid)      { await redisRaw(env, "sadd", "blocked_users", String(uid)); }
+export async function dbUnblock(env, uid)    { await redisRaw(env, "srem", "blocked_users", String(uid)); }
+export async function dbCountBlocked(env)    { const r = await redisRaw(env, "scard", "blocked_users"); return r.result || 0; }
+
+export async function dbIsMuted(env, uid)    { const r = await redisRaw(env, "sismember", "muted_users", String(uid)); return r.result === 1; }
+export async function dbMute(env, uid)       { await redisRaw(env, "sadd", "muted_users", String(uid)); }
+export async function dbUnmute(env, uid)     { await redisRaw(env, "srem", "muted_users", String(uid)); }
+export async function dbCountMuted(env)      { const r = await redisRaw(env, "scard", "muted_users"); return r.result || 0; }
+
+// --- FUNGSI PENYARINGAN KATA (Blacklist Keywords) ---
 export async function dbContainsBlacklistedKw(env, text) {
-  const kws = await redisCmd(env, "SMEMBERS", "blacklist_keywords") || [];
-  const t = String(text).toLowerCase();
-  return kws.some(k => t.includes(String(k).toLowerCase()));
+  const r = await redisRaw(env, "smembers", "blacklisted_keywords");
+  const list = r.result || [];
+  return list.some(kw => text.toLowerCase().includes(kw.toLowerCase()));
 }
-export async function dbAddKw(env, kw) { await redisCmd(env, "SADD", "blacklist_keywords", String(kw).trim()); }
-export async function dbDelKw(env, kw) { await redisCmd(env, "SREM", "blacklist_keywords", String(kw).trim()); }
-export async function dbListKw(env) { return await redisCmd(env, "SMEMBERS", "blacklist_keywords") || []; }
-export async function dbCountKw(env) { return Number(await redisCmd(env, "SCARD", "blacklist_keywords")) || 0; }
+export async function dbAddKw(env, kw)   { await redisRaw(env, "sadd", "blacklisted_keywords", kw.trim()); }
+export async function dbDelKw(env, kw)   { await redisRaw(env, "srem", "blacklisted_keywords", kw.trim()); }
+export async function dbListKw(env)      { const r = await redisRaw(env, "smembers", "blacklisted_keywords"); return r.result || []; }
+export async function dbCountKw(env)     { const r = await redisRaw(env, "scard", "blacklisted_keywords"); return r.result || 0; }
 
-// ── Menfess ──
-export async function dbSaveMenfess(env, msgId, data) { await redisSet(env, `mf_msg:${msgId}`, data, 604800); }
-export async function dbGetMenfess(env, msgId) { return redisGet(env, `mf_msg:${msgId}`); }
-export async function dbDeleteMenfess(env, msgId) { await redisDel(env, `mf_msg:${msgId}`); }
+// --- DATA TEMPORER (Pending State & Admin Relay) ---
+export async function dbSavePending(env, uid, obj)   { await redisRaw(env, "set", `pending:${uid}`, JSON.stringify(obj), "EX", "600"); }
+export async function dbGetPending(env, uid)         { const r = await redisRaw(env, "get", `pending:${uid}`); return r.result ? JSON.parse(r.result) : null; }
+export async function dbDeletePending(env, uid)      { await redisRaw(env, "del", `pending:${uid}`); }
 
-// ── Pending ──
-export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 300); }
-export async function dbGetPending(env, uid)        { return redisGet(env, `mf_pending:${uid}`); }
-export async function dbDeletePending(env, uid)     { await redisDel(env, `mf_pending:${uid}`); }
+export async function dbGetReferralBonus(env, uid)   { const r = await redisRaw(env, "get", `quota:${uid}`); return Number(r.result || 0); }
+export async function dbAddReferralBonus(env, uid, n) { await redisRaw(env, "incrby", `quota:${uid}`, String(n)); }
+export async function dbUseReferralBonus(env, uid)   { await redisRaw(env, "decr", `quota:${uid}`); }
 
-// ── Referral ──
-export async function dbGetReferralBonus(env, uid) { return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0; }
-export async function dbAddReferralBonus(env, uid, amount) { await redisCmd(env, "INCRBY", `mf_refbonus:${uid}`, amount); }
-export async function dbUseReferralBonus(env, uid) {
-  const bonus = await dbGetReferralBonus(env, uid);
-  if (bonus > 0) { await redisCmd(env, "DECR", `mf_refbonus:${uid}`); return true; }
-  return false;
+export async function dbHasUsedReferral(env, uid)    { const r = await redisRaw(env, "get", `has_ref:${uid}`); return r.result !== null; }
+export async function dbRecordReferral(env, uid, by) { await redisRaw(env, "set", `has_ref:${uid}`, String(by)); }
+export async function dbCountReferrals(env, uid)    { const r = await redisRaw(env, "get", `ref_count:${uid}`); return Number(r.result || 0); }
+
+export async function dbGetContactState(env, uid)    { const r = await redisRaw(env, "get", `contact:${uid}`); return r.result ? JSON.parse(r.result) : null; }
+export async function dbSetContactState(env, uid, o) { await redisRaw(env, "set", `contact:${uid}`, JSON.stringify(o), "EX", "1800"); }
+export async function dbDelContactState(env, uid)    { await redisRaw(env, "del", `contact:${uid}`); }
+
+export async function dbGetAdminReply(env, uid)      { const r = await redisRaw(env, "get", `adm_reply:${uid}`); return r.result ? JSON.parse(r.result) : null; }
+export async function dbSetAdminReply(env, uid, t)   { await redisRaw(env, "set", `adm_reply:${uid}`, JSON.stringify({ targetUid: t }), "EX", "600"); }
+export async function dbDelAdminReply(env, uid)      { await redisRaw(env, "del", `adm_reply:${uid}`); }
+
+// --- DATA PERSISTEN STRATEGIS DIALIHKAN KE GOOGLE SPREADSHEET (Hemat RAM Redis) ---
+async function callSpreadsheet(env, bodyObj) {
+  if (!env.SPREADSHEET_API_URL) return { ok: false };
+  try {
+    const res = await fetch(env.SPREADSHEET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyObj)
+    });
+    return await res.json();
+  } catch (e) {
+    console.error("Spreadsheet API Connection Error:", e.message);
+    return { ok: false };
+  }
 }
-export async function dbHasUsedReferral(env, uid) { return !!(await redisCmd(env, "EXISTS", `mf_refused:${uid}`)); }
-export async function dbRecordReferral(env, uid, refId) {
-  await redisCmd(env, "SET", `mf_refused:${uid}`, String(refId));
-  await redisCmd(env, "SADD", `mf_referrals_list:${refId}`, String(uid));
-}
-export async function dbCountReferrals(env, uid) { return Number(await redisCmd(env, "SCARD", `mf_referrals_list:${uid}`)) || 0; }
 
-// ── Contact Admin & Admin Reply Session ──
-export async function dbGetContactState(env, uid) { return redisGet(env, `contact_state:${uid}`); }
-export async function dbSetContactState(env, uid, data) { await redisSet(env, `contact_state:${uid}`, data, 86400); }
-export async function dbDelContactState(env, uid) { await redisDel(env, `contact_state:${uid}`); }
-export async function dbGetAdminReply(env, adminId) { return redisGet(env, `admin_reply:${adminId}`); }
-export async function dbSetAdminReply(env, adminId, targetUid) { await redisSet(env, `admin_reply:${adminId}`, { targetUid }, 3600); }
-export async function dbDelAdminReply(env, adminId) { await redisDel(env, `admin_reply:${adminId}`); }
+export async function dbRegisterUser(env, uid, gender = "unknown", username = "") {
+  // Disimpan ke Spreadsheet agar storage Redis 0% terbebani
+  await callSpreadsheet(env, { action: "register_user", user_id: uid, gender, username });
+}
+
+export async function dbSaveMenfess(env, msgId, data) {
+  // Menfess bertambah tanpa limit, Spreadsheet adalah storage gratis terbaik
+  await callSpreadsheet(env, { action: "save_menfess", message_id: msgId, sender_id: data.user_id, text: data.text });
+  // Cadangan sementara di Redis untuk fitur pencocokan hapus instan (auto expired 1 hari)
+  await redisRaw(env, "set", `mf_owner:${msgId}`, String(data.user_id), "EX", "86400");
+}
+
+export async function dbGetMenfess(env, msgId) {
+  const r = await redisRaw(env, "get", `mf_owner:${msgId}`);
+  return r.result ? { user_id: r.result } : null;
+}
+
+export async function dbDeleteMenfess(env, msgId) {
+  await redisRaw(env, "del", `mf_owner:${msgId}`);
+}
+
+export async function dbAllUserIds(env) {
+  // Broadcast menarik ribuan ID dari Spreadsheet tanpa menyentuh perintah SCAN/KEYS di Redis
+  const res = await callSpreadsheet(env, { action: "get_all_users" });
+  return res.ok ? res.users : [];
+}
+
+export async function dbCountUsers(env) {
+  const res = await callSpreadsheet(env, { action: "get_all_users" });
+  return res.ok ? res.users.length : 0;
+}
