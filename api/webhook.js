@@ -71,7 +71,18 @@ export default async function handler(req, res) {
     if (!env.KV_URL || !env.BOT_TOKEN) return res.status(200).json({ ok: true });
 
     const api = tg(env.BOT_TOKEN);
-    const update = req.body;
+    
+    // PENANGANAN AUTOMATIS JIKA PAYLOAD TER-URL-ENCODE (%) ATAU STR_CORRUPT
+    let update = req.body;
+    if (typeof update === "string") {
+      if (update.startsWith("%")) {
+        update = decodeURIComponent(update);
+      }
+      if (update.includes("=")) {
+        update = update.substring(update.indexOf("=") + 1);
+      }
+      update = JSON.parse(update);
+    }
 
     if (update.callback_query) {
       await handleCallback(update.callback_query, env, api);
@@ -122,8 +133,23 @@ async function handleMessage(msg, env, api) {
                        `🚫 *Manajemen Filter Kata Kasar*:\n` +
                        `• \`/addkw [kata]\` - Tambah kata dilarang\n` +
                        `• \`/delkw [kata]\` - Hapus kata dilarang\n` +
-                       `• \`/listkw\` - Tampilkan semua daftar kata sensor`;
+                       `• \`/listkw\` - Tampilkan semua daftar kata sensor\n\n` +
+                       `⚠️ *Sistem Pembersihan Developer*:\n` +
+                       `• \`/resetredis\` - Kosongkan total database Redis (Sesi & Queue)`;
       return api.send({ chat_id: chatId, text: panelTxt, parse_mode: "Markdown" });
+    }
+
+    if (text === "/resetredis") {
+      const redisBaseUrl = env.KV_URL.replace("redis://", "https://").replace("rediss://", "https://");
+      const clearRes = await fetch(`${redisBaseUrl}/flushdb`, {
+        headers: { Authorization: `Bearer ${env.KV_TOKEN}` }
+      });
+      const clearJson = await clearRes.json();
+      if (clearJson.result === "OK") {
+        return api.send({ chat_id: chatId, text: "🔄 *DATABASE UPSTASH REDIS BERHASIL DI-RESET!* \nSeluruh antrean, sesi chat aktif, dan status pencarian temporer telah dikosongkan kembali bersih.", parse_mode: "Markdown" });
+      } else {
+        return api.send({ chat_id: chatId, text: "❌ Gagal mereset database Redis." });
+      }
     }
 
     if (text.startsWith("/addprem ")) {
@@ -249,7 +275,7 @@ async function handleMessage(msg, env, api) {
     if (!existingUser || !existingUser.gender) {
       return api.send({
         chat_id: chatId,
-        text: "👋 Selamat datang di Anon Space!\n\nSebelum memulai, silakan pilih gender Anda:",
+        text: "👋 Selamat datang di Anon Space!\n\nSebelum memulai, silakan pilih gender Anda (Hanya perlu diisi sekali saja):",
         reply_markup: ikbd([[btn("🙋‍♂️ Laki-laki", "reg_gender_male"), btn("🙋‍♀️ Perempuan", "reg_gender_female")]])
       });
     }
@@ -280,9 +306,15 @@ async function handleMessage(msg, env, api) {
     me.searchFilter = "all";
     await acSetUser(env, uidNum, me);
     await acAddToQueue(env, uidNum);
-    await api.send({ chat_id: chatId, text: "⏳ Sedang mencarikan partner acak untukmu...", reply_markup: { keyboard: [[{ text: "🛑 Stop" }]], resize_keyboard: true } });
-    await triggerMatching(env, uidNum, api);
-    return;
+    
+    // NOTIFIKASI PROMOSI PREMIUM UNTUK USER NON-PREMIUM SAAT MENCARI PARTNER
+    return tgRaw(env.BOT_TOKEN, "sendMessage", {
+      chat_id: chatId,
+      text: "⏳ Sedang mencarikan partner acak untukmu...\n\n👑 *Bosan dapat partner acak terus?* Upgrade ke Akun Premium sekarang untuk bisa pilih kriteria khusus Cowok/Cewek dan buka fitur link profil langsung!",
+      reply_markup: { keyboard: [[{ text: "🛑 Stop" }]], resize_keyboard: true }
+    }).then(() => {
+      triggerMatching(env, uidNum, api);
+    });
   }
 
   if (text === "⏭️ Next" || text === "/next") {
@@ -331,7 +363,7 @@ async function handleMessage(msg, env, api) {
     return api.send({
       chat_id: chatId,
       text: "📝 Konfirmasi Pengiriman:",
-      reply_markup: ikbd([[btn("🚀 Kirim (Gratis)", "mf_send_normal"), btn("⏱️ Kirim (Pakai Slot Auto-Delete)", "mf_send_autodel")], [btn("❌ Batal", "mf_send_cancel")]])
+      reply_markup: ikbd([[btn("🚀 Kirim (Gratis)", "mf_send_normal"), btn("⏱️ Kirim (Auto-Delete)", "mf_send_autodel")], [btn("❌ Batal", "mf_send_cancel")]])
     });
   }
 
@@ -343,10 +375,24 @@ async function handleMessage(msg, env, api) {
   if (text === "🎁 Bonus & Referral") {
     const b = await dbGetReferralBonus(env, uidNum);
     const c = await dbCountReferrals(env, uidNum);
+    
+    const refTxt = `🎁 *MENU BONUS & PREMIUM USER*\n━━━━━━━━━━━━━━━\n` +
+                   `👤 Total Rekomendasi: *${c}*\n` +
+                   `⏱️ Slot Auto-Delete Anda: *${b}*\n\n` +
+                   `👑 *KEUNTUNGAN AKUN PREMIUM*:\n` +
+                   `1. Bebas Pilih Gender Partner (Cari Cowok / Cewek)\n` +
+                   `2. Akses Tautan Profil Rahasia (\`tg://user?id=\`) secara instan tanpa username\n` +
+                   `3. Prioritas Masuk Antrean Utama (*Matchmaking Priority*)\n\n` +
+                   `👇 Ketuk tombol di bawah untuk info pendaftaran premium atau bagikan referral link Anda:`;
+
     return api.send({
       chat_id: chatId,
-      text: `🎁 *Menu Bonus & Slot*\n━━━━━━━━━━━━━━━\n👤 Total Rekomendasi: *${c}*\n⏱️ Slot Auto-Delete Anda: *${b}*`,
-      reply_markup: ikbd([[burl("🔗 Ambil Link Referral", shareUrl(refLink(env, uidNum)))]])
+      text: refTxt,
+      parse_mode: "Markdown",
+      reply_markup: ikbd([
+        [btn("👑 Daftar Akun Premium", "premium_info_buy")],
+        [burl("🔗 Ambil Link Referral", shareUrl(refLink(env, uidNum)))]
+      ])
     });
   }
 
@@ -359,7 +405,7 @@ async function handleMessage(msg, env, api) {
     const donateMediaUrl = "https://ibb.co.com/627jPK1";
     const donateCaption = `☕ *Dukung Pengembangan Bot Ini* \n━━━━━━━━━━━━━━━━━\n` +
                           `Halo! Jika kamu merasa bot ini bermanfaat dan ingin membantu menjaga server tetap aktif, kamu bisa memberikan dukungan sukarela melalui:\n\n` +
-                          `📟 *SCAN QR-Code* di atas\n\n` +
+                          `📟 *SCAN QR-Code* di atas atau\n\n` +
                           `Terima kasih banyak atas kebaikan dan dukunganmu! ❤️`;
 
     return tgRaw(env.BOT_TOKEN, "sendPhoto", {
@@ -368,7 +414,7 @@ async function handleMessage(msg, env, api) {
       caption: donateCaption,
       parse_mode: "Markdown"
     });
-  } 
+  }
 
   if (text === "🚨 Report Partner" || text === "/report") {
     const activeSession = await acGetSession(env, uidNum);
@@ -403,6 +449,20 @@ async function handleMessage(msg, env, api) {
 async function handleCallback(query, env, api) {
   const data = query.data, chatId = query.message.chat.id, msgId = query.message.message_id, uidNum = query.from.id;
 
+  if (data === "premium_info_buy") {
+    await api.answer(query.id);
+    const buyTxt = `👑 *PROSEDUR AKTIVASI PREMIUM USER*\n━━━━━━━━━━━━━━━\n` +
+                   `Aktivasi instan diproses manual oleh Admin utama melalui verifikasi transfer:\n\n` +
+                   `💳 *Pilihan Paket Premium:*\n` +
+                   `• Paket 3 Hari (3d) : Rp 5.000\n` +
+                   `• Paket 1 Minggu (1w): Rp 10.000\n` +
+                   `• Paket 1 Bulan (1m) : Rp 25.000\n\n` +
+                   `Silakan kirimkan format pembayaran beserta bukti transfer ke menu *📬 Hubungi Admin* di beranda bot dengan menyertakan User ID Anda:\n\n` +
+                   `Format: \`Klaim Premium - [User ID Kamu] - [Pilihan Paket]\` \n\n` +
+                   `User ID Anda: \`${uidNum}\``;
+    return api.send({ chat_id: chatId, text: buyTxt, parse_mode: "Markdown" });
+  }
+
   if (data.startsWith("reg_gender_")) {
     const pickedGender = data.replace("reg_gender_", "");
     await api.answer(query.id, "Data gender disimpan!");
@@ -410,7 +470,13 @@ async function handleCallback(query, env, api) {
     await acSetUser(env, uidNum, { gender: pickedGender, isPremium: false, premiumExpire: 0 });
     await dbRegisterUser(env, uidNum, pickedGender, query.from.username || "no_username");
 
-    return api.edit({ chat_id: chatId, message_id: msgId, text: `✅ Berhasil mendaftar sebagai *${pickedGender === 'male' ? 'Laki-laki 🙋‍♂️' : 'Perempuan 🙋‍♀️'}*.\n\nKetik /start untuk membuka menu utama.`, parse_mode: "Markdown" });
+    // PROMOSI DI AKHIR REGISTRASI AWAL USER BARU
+    const finishTxt = `✅ Berhasil mendaftar sebagai *${pickedGender === 'male' ? 'Laki-laki 🙋‍♂️' : 'Perempuan 🙋‍♀️'}*.\n━━━━━━━━━━━━━━━\n` +
+                      `🌟 *PROMO MEMBER BARU:*\nIngin langsung cari partner lawan jenis tanpa sistem acak? Cukup ketik tombol *🎁 Bonus & Referral* di menu utama untuk upgrade ke Premium!`;
+    
+    return api.edit({ chat_id: chatId, message_id: msgId, text: finishTxt, parse_mode: "Markdown" }).then(() => {
+       tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: chatId, text: "🤖 Menu utama aktif. Silakan pilih navigasi di bawah ini:", reply_markup: getMainMenuKeyboard() });
+    });
   }
 
   if (data.startsWith("match_filter_")) {
@@ -505,7 +571,7 @@ async function triggerMatching(env, uidNum, api) {
 async function submitReport(uidNum, pending, autoDelete, env, api) {
   try {
     let method = "sendMessage", body = { chat_id: env.CHANNEL_ID, parse_mode: "HTML" };
-    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n<i>menfess dari @KEKprojects_bot_</i>`;
+    const defaultTail = `\n\n━━━━━━━━━━━━━━━\n<i>menfess dari @KEKprojects_bot</i>`;
 
     const escapeHtml = (s) => (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
