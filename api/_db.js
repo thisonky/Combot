@@ -233,7 +233,7 @@ export async function dbCountMenfess(env) {
 
 // ── Pending State Menfess Approval ─────────────────────────────────────
 
-export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 300); }
+export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 172800); }
 export async function dbGetPending(env, uid)        { return redisGet(env, `mf_pending:${uid}`); }
 export async function dbDeletePending(env, uid)     { await redisDel(env, `mf_pending:${uid}`); }
 
