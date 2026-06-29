@@ -633,19 +633,25 @@ if (data.startsWith("acc_") || data.startsWith("rej_")) {
   }
 
   // Aksi Mod: Persetujuan Menfess
-  const channelMsg = `Menfess dari @KEKprojects_bot\n\n${escapeMd(p.text)}\n\n---`;
-  let sentCh;
+      // ── PATCH NYATA: GANTI BLOK PENGIRIMAN CHANNEL MENJADI HTML (ANTI-EROR PARSING) ──
+    
+    // Konversi teks aman dari tag HTML agar tidak merusak entitas Telegram
+    const escapedText = String(p.text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const channelMsg = `<i>#MenfessNew</i> @KEKprojects_bot\n\n${escapedText}\n\n---`;
+    let sentCh;
 
-  // 2. Transmisi Konten ke Target Channel Utama (Gunakan object p secara strict)
-  if (p.mediaType === "photo") {
-    sentCh = await tgRaw(env.BOT_TOKEN, "sendPhoto", { chat_id: env.CHANNEL_ID, photo: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-  } else if (p.mediaType === "video") {
-    sentCh = await tgRaw(env.BOT_TOKEN, "sendVideo", { chat_id: env.CHANNEL_ID, video: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-  } else if (p.mediaType === "voice") {
-    sentCh = await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: env.CHANNEL_ID, voice: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-  } else {
-    sentCh = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.CHANNEL_ID, text: channelMsg, parse_mode: "Markdown" });
-  }
+    if (p.mediaType === "photo") {
+      sentCh = await tgRaw(env.BOT_TOKEN, "sendPhoto", { chat_id: env.CHANNEL_ID, photo: p.fileId, caption: channelMsg, parse_mode: "HTML" });
+    } else if (p.mediaType === "video") {
+      sentCh = await tgRaw(env.BOT_TOKEN, "sendVideo", { chat_id: env.CHANNEL_ID, video: p.fileId, caption: channelMsg, parse_mode: "HTML" });
+    } else if (p.mediaType === "voice") {
+      sentCh = await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: env.CHANNEL_ID, voice: p.fileId, caption: channelMsg, parse_mode: "HTML" });
+    } else {
+      sentCh = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.CHANNEL_ID, text: channelMsg, parse_mode: "HTML" });
+    }
+    
+    // ────────────────────────────────────────────────────────────────────────────────
+
 
   // 3. Evaluasi ketat hasil kembalian Telegram
   if (sentCh && sentCh.ok) {
