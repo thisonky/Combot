@@ -601,84 +601,88 @@ async function handleCallback(cb, env, api) {
   }
 
   // ── SISTEM INTERSEPSI TOMBOL MENFESS ADMIN (Proteksi Kadaluwarsa) ──
-  if (data.startsWith("acc_") || data.startsWith("rej_")) {
-    const [action, pid] = data.split("_");
-    const p = await dbGetPending(env, pid);
-    
-    if (!p) {
-      return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses oleh admin lain.", true);
-    }
-
-    // Hapus antrean seketika untuk mencegah double click/eksekusi ganda
-    await dbDeletePending(env, pid);
-    const chUsername = String(env.CHANNEL_ID).replace("@", "");
-
-    // Aksi Mod: Penolakan Menfess
-    if (action === "rej") {
-      const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n❌ *STATUS: DITOLAK ADMIN*`;
-      await Promise.all([
-        tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption }).catch(() => {}),
-        tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {})
-      ]);
-      
-      await tgRaw(env.BOT_TOKEN, "sendMessage", { 
-        chat_id: Number(p.userId), 
-        text: "❌ *Menfess Anda Ditolak*\n\nMaaf, menfess Anda ditolak oleh admin karena tidak sesuai dengan ketentuan komunitas." 
-      });
-      return api.answer(cbId, "Menfess ditolak.");
-    }
-
-    // Aksi Mod: Persetujuan Menfess (Konsumsi Kuota Transaksional Aman)
-    await dbIncrementDaily(env, Number(p.userId));
-    const usedBonus = await dbUseReferralBonus(env, Number(p.userId));
-
-    const channelMsg = `💌 _#MenfessNew_ @KEKprojects_bot\n\n${escapeMd(p.text)}\n\n---`;
-    let sentCh;
-
-    // Distribusi Penerbitan Media Konten ke Target Channel Utama
-    if (p.mediaType === "photo") {
-      sentCh = await tgRaw(env.BOT_TOKEN, "sendPhoto", { chat_id: env.CHANNEL_ID, photo: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-    } else if (p.mediaType === "video") {
-      sentCh = await tgRaw(env.BOT_TOKEN, "sendVideo", { chat_id: env.CHANNEL_ID, video: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-    } else if (p.mediaType === "voice") {
-      sentCh = await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: env.CHANNEL_ID, voice: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
-    } else {
-      sentCh = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.CHANNEL_ID, text: channelMsg, parse_mode: "Markdown" });
-    }
-
-    if (sentCh?.ok) {
-      const chMsgId = sentCh.result.message_id;
-      await dbSaveMenfess(env, chMsgId, p.userId, p.senderName, p.text);
-
-      // Ubah tampilan dashboard admin mod guna menandakan kesuksesan terbit
-      const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n✅ *STATUS: PUBLISHED DI CHANNEL*\n🆔 *Msg ID:* \`${chMsgId}\``;
-      await Promise.all([
-        tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption }).catch(() => {}),
-        tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {})
-      ]);
-
-      // ── LOGIKA DINAMIS PEMBUATAN HYPERLINK INSTAN KE CHANNEL ──
-      let postLink = `https://t.me/${chUsername}/${chMsgId}`;
-      if (String(env.CHANNEL_ID).startsWith("-100")) {
-        const cleanId = String(env.CHANNEL_ID).replace("-100", "");
-        postLink = `https://t.me/c/${cleanId}/${chMsgId}`;
-      }
-
-      // Kirim Notifikasi Instan Beserta Tombol URL Hyperlink ke User Pengirim
-      await tgRaw(env.BOT_TOKEN, "sendMessage", {
-        chat_id: Number(p.userId),
-        parse_mode: "Markdown",
-        text: `🚀 *Menfess Anda Berhasil Terbit!*\n\nPesan rahasia Anda telah disetujui oleh admin dan kini sudah mengudara di channel resmi. ${usedBonus ? "\n_(Menggunakan slot kuota bonus referral)_" : ""}`,
-        reply_markup: {
-          inline_keyboard: [[{ text: "📱 Lihat Menfess Kamu", url: postLink }]]
-        }
-      });
-
-    } else {
-      return api.answer(cbId, "⚠️ Gagal menerbitkan ke channel. Cek izin administrasi bot.", true);
-    }
-    return api.answer(cbId, "Menfess berhasil dipublikasikan!");
+// ── PATCH PRESISI: CALLBACK QUERY APPROVAL ───────────────────────────
+if (data.startsWith("acc_") || data.startsWith("rej_")) {
+  const action = data.substring(0, 3); // Mengambil "acc" atau "rej"
+  const pid = data.substring(4);       // Mengambil sisa string ID secara utuh (pnd_xxx_xxx)
+  
+  const p = await dbGetPending(env, pid);
+  
+  if (!p) {
+    return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses oleh admin lain.", true);
   }
+
+  const chUsername = String(env.CHANNEL_ID).replace("@", "");
+
+  // Aksi Mod: Penolakan Menfess
+  if (action === "rej") {
+    await dbDeletePending(env, pid); // Hapus state hanya jika aksi dikonfirmasi selesai
+    
+    const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n❌ *STATUS: DITOLAK ADMIN*`;
+    await Promise.all([
+      tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption }).catch(() => {}),
+      tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {})
+    ]);
+    
+    await tgRaw(env.BOT_TOKEN, "sendMessage", { 
+      chat_id: Number(p.userId), 
+      text: "❌ *Menfess Anda Ditolak*\n\nMaaf, menfess Anda ditolak oleh admin karena tidak sesuai dengan ketentuan komunitas." 
+    });
+    return api.answer(cbId, "Menfess ditolak.");
+  }
+
+  // Aksi Mod: Persetujuan Menfess
+  await dbIncrementDaily(env, Number(p.userId));
+  const usedBonus = await dbUseReferralBonus(env, Number(p.userId));
+
+  const channelMsg = `Menfess dari @KEKprojects_bot\n\n${escapeMd(p.text)}\n\n---`;
+  let sentCh;
+
+  // Distribusi Penerbitan Media Konten
+  if (p.mediaType === "photo") {
+    sentCh = await tgRaw(env.BOT_TOKEN, "sendPhoto", { chat_id: env.CHANNEL_ID, photo: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
+  } else if (p.mediaType === "video") {
+    sentCh = await tgRaw(env.BOT_TOKEN, "sendVideo", { chat_id: env.CHANNEL_ID, video: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
+  } else if (p.mediaType === "voice") {
+    sentCh = await tgRaw(env.BOT_TOKEN, "sendVoice", { chat_id: env.CHANNEL_ID, voice: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
+  } else {
+    sentCh = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.CHANNEL_ID, text: channelMsg, parse_mode: "Markdown" });
+  }
+
+  if (sentCh?.ok) {
+    const chMsgId = sentCh.result.message_id;
+    
+    // ASYNC HYGIENE: Eksekusi database & pembersihan state dilakukan SETELAH Telegram sukses merespons
+    await dbSaveMenfess(env, chMsgId, p.userId, p.senderName, p.text);
+    await dbDeletePending(env, pid);
+
+    const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n✅ *STATUS: PUBLISHED DI CHANNEL*\n🆔 *Msg ID:* \`${chMsgId}\``;
+    await Promise.all([
+      tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption }).catch(() => {}),
+      tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {})
+    ]);
+
+    let postLink = `https://t.me/${chUsername}/${chMsgId}`;
+    if (String(env.CHANNEL_ID).startsWith("-100")) {
+      const cleanId = String(env.CHANNEL_ID).replace("-100", "");
+      postLink = `https://t.me/c/${cleanId}/${chMsgId}`;
+    }
+
+    await tgRaw(env.BOT_TOKEN, "sendMessage", {
+      chat_id: Number(p.userId),
+      parse_mode: "Markdown",
+      text: `🚀 *Menfess Anda Berhasil Terbit!*\n\nPesan rahasia Anda telah disetujui oleh admin.`,
+      reply_markup: {
+        inline_keyboard: [[{ text: "📱 Lihat Menfess Kamu", url: postLink }]]
+      }
+    });
+
+  } else {
+    return api.answer(cbId, "⚠️ Gagal menerbitkan ke channel. Cek izin administrasi bot.", true);
+  }
+  return api.answer(cbId, "Menfess berhasil dipublikasikan!");
+}
+
 
   // Modul Pemrosesan Blokir Langsung Lewat Tombol Dashboard Admin Mod
   if (data.startsWith("ban_") || data.startsWith("mute_")) {
