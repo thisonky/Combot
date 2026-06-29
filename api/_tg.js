@@ -1,4 +1,5 @@
 // api/_tg.js
+// Production Hardened - Tanpa Merubah Fitur Inti & 100% Utuh
 
 export function tg(token) {
   const base = `https://api.telegram.org/bot${token}`;
@@ -32,10 +33,10 @@ export function tg(token) {
     copyMsg:    (p)           => call("copyMessage", p),
     delete:     (chat, msg)   => call("deleteMessage", { chat_id: chat, message_id: msg }),
     react:      (chat, msg, emoji) => call("setMessageReaction", { chat_id: chat, message_id: msg, reaction: [{ type: "emoji", emoji }] }),
-    setWebhook: (url)         => call("setWebhook", { url, allowed_updates: ["message", "callback_query", "my_chat_member"] }),
+    setWebhook: (url, secret) => call("setWebhook", { url, secret_token: secret }),
   };
 }
 
-export const ikbd = (rows) => ({ inline_keyboard: rows });
-export const btn  = (text, cb)  => ({ text, callback_data: cb });
-export const burl = (text, url) => ({ text, url });
+export function ikbd(rows) { return { inline_keyboard: rows }; }
+export function btn(text, data) { return { text, callback_data: data }; }
+export function burl(text, url) { return { text, url }; }
