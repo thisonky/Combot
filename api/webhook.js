@@ -753,18 +753,30 @@ async function handleCallback(cb, env, api) {
     return api.answer(cbId, "Profil berhasil disimpan!");
   }
 
-  // Integrasi Eksekusi Manajemen Antrean Menfess
+  // 🔥 PERBAIKAN UTAMA: Manajemen Antrean Menfess
   if (data.startsWith("acc_") || data.startsWith("rej_")) {
     const [action, pid] = data.split("_");
     const p = await dbGetPending(env, pid);
-    if (!p) return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses.", true);
+    
+    if (!p) {
+      return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses.", true);
+    }
 
+    // Hapus status pending agar tidak diproses ganda
     await dbDeletePending(env, pid);
 
+    // Ambil username channel tanpa tanda '@' untuk keperluan pembuatan tautan
+    const chUsername = String(env.CHANNEL_ID).replace("@", "");
+
     if (action === "rej") {
-      await tgRaw(env.BOT_TOKEN, "editMessageLive", {}); // membersihkan inline keyboard lama
-      await tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: `${cb.message.caption || cb.message.text}\n\n❌ *STATUS: DITOLAK ADMIN*` });
-      await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: Number(p.userId), text: "❌ Maaf, menfess Anda ditolak oleh admin karena tidak sesuai panduan komunitas." });
+      const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n❌ *STATUS: DITOLAK ADMIN*`;
+      await tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption });
+      await tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {});
+      
+      await tgRaw(env.BOT_TOKEN, "sendMessage", { 
+        chat_id: Number(p.userId), 
+        text: "❌ *Menfess Anda Ditolak*\n\nMaaf, menfess Anda ditolak oleh admin karena tidak sesuai dengan panduan komunitas/mengandung unsur sensitif." 
+      });
       return api.answer(cbId, "Menfess ditolak.");
     }
 
@@ -790,18 +802,33 @@ async function handleCallback(cb, env, api) {
       const chMsgId = sentCh.result.message_id;
       await dbSaveMenfess(env, chMsgId, p.userId, p.senderName, p.text);
 
-      // Mutasi Tampilan Dashboard Admin Mod
+      // 1. Mutasi Tampilan Dashboard Admin Mod (Menghilangkan tombol setelah sukses)
       const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n✅ *STATUS: PUBLISHED DI CHANNEL*\n🆔 *Msg ID:* \`${chMsgId}\``;
       await tgRaw(env.BOT_TOKEN, "editMessageCaption", { chat_id: adminChatId, message_id: adminMsgId, caption: updatedAdminCaption });
       await tgRaw(env.BOT_TOKEN, "editMessageText", { chat_id: adminChatId, message_id: adminMsgId, text: updatedAdminCaption }).catch(() => {});
 
-      // Kirim Notifikasi ke Pengirim
+      // 2. Pembuatan Hyperlink Menuju Pesan Channel secara Dinamis
+      // Jika CHANNEL_ID menggunakan format @username, kita bisa buat link t.me/username/id
+      // Jika berupa ID angka (-100xxx), kita buat link privat t.me/c/xxx/id
+      let postLink = `https://t.me/${chUsername}/${chMsgId}`;
+      if (String(env.CHANNEL_ID).startsWith("-100")) {
+        const cleanId = String(env.CHANNEL_ID).replace("-100", "");
+        postLink = `https://t.me/c/${cleanId}/${chMsgId}`;
+      }
+
+      // 3. 🔥 KIRIM NOTIFIKASI + TOMBOL HYPERLINK KE USER PENGIRIM
       await tgRaw(env.BOT_TOKEN, "sendMessage", {
         chat_id: Number(p.userId),
-        text: `🚀 *Menfess Anda Berhasil Terbit!*\nLihat di channel kami.\n⚡ Sisa kuota harian Anda berkurang ${usedBonus ? "(menggunakan slot bonus referral)" : ""}.`,
+        parse_mode: "Markdown",
+        text: `🚀 *Menfess Anda Berhasil Terbit!*\n\nPesan rahasia Anda telah disetujui oleh admin dan kini sudah mengudara di channel resmi. ${usedBonus ? "\n_(Menggunakan slot kuota bonus referral)_" : ""}`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📱 Lihat Menfess Kamu", url: postLink }]
+          ]
+        }
       });
 
-      // Fitur Auto-Delete Terjadwal Otomatis Berbasis Worker Terpisah / Background
+      // Fitur Auto-Delete Terjadwal Otomatis
       if (p.isAutoDel) {
         setTimeout(async () => {
           await tgRaw(env.BOT_TOKEN, "deleteMessage", { chat_id: env.CHANNEL_ID, message_id: chMsgId }).catch(() => {});
@@ -814,7 +841,7 @@ async function handleCallback(cb, env, api) {
     return api.answer(cbId, "Menfess berhasil dipublikasikan!");
   }
 
-  // Opsi Pengendali Ban & Mute Langsung Melalui Dashboard Notifikasi Admin
+  // Opsi Pengendali Ban & Mute Langsung Melalui Dashboard Admin
   if (data.startsWith("ban_") || data.startsWith("mute_")) {
     const tokens = data.split("_");
     const targetUid = tokens[1];
@@ -829,6 +856,7 @@ async function handleCallback(cb, env, api) {
     }
   }
 }
+
 
 // ── Admin Command Center Engine (.command) ────────────────────────────
 
