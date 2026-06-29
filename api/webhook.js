@@ -600,32 +600,24 @@ async function handleCallback(cb, env, api) {
     return api.answer(cbId, "Profil berhasil disimpan!");
   }
 
-  // ── SISTEM INTERSEPSI TOMBOL MENFESS ADMIN (Proteksi Kadaluwarsa) ──
-// ── PATCH PRESISI: CALLBACK QUERY APPROVAL ───────────────────────────
-// ── PATCH NYATA: Ganti Bagian Awal Pengecekan acc/rej di api/webhook.js ──
+// ── PATCH NYATA AMAN: api/webhook.js ──
+
 if (data.startsWith("acc_") || data.startsWith("rej_")) {
-  // SALAH SEBELUMNYA: const [action, pid] = data.split("_"); (Memotong pnd_msg_id)
-  
-  // PERBAIKAN NYATA: Ambil aksi dan ID secara utuh menggunakan substring
-  const action = data.substring(0, 3); // Menghasilkan "acc" atau "rej"
-  const pid = data.substring(4);       // Menghasilkan "pnd_msgid_userid" secara utuh
-  
+  // 1. Ekstraksi Aksi & ID secara literal tanpa merusak susunan karakter underscore (_)
+  const action = data.substring(0, 3); // "acc" atau "rej"
+  const pid = data.substring(4);       // Mengambil "pnd_msgid_userid" secara utuh
+
   const p = await dbGetPending(env, pid);
   
   if (!p) {
-    return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses.", true);
+    return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses oleh admin lain.", true);
   }
-
-  // --- SISA KODE ASLI ANDA DI BAWAHNYA JANGAN DIUBAH ---
-  // (Pindahkan perintah `await dbDeletePending(env, pid);` milik kode asli Anda 
-  // dari bagian paling atas ke dalam blok setelah pesan sukses terkirim ke channel `if (sentCh?.ok)`)
-
 
   const chUsername = String(env.CHANNEL_ID).replace("@", "");
 
   // Aksi Mod: Penolakan Menfess
   if (action === "rej") {
-    await dbDeletePending(env, pid); // Hapus state hanya jika aksi dikonfirmasi selesai
+    await dbDeletePending(env, pid);
     
     const updatedAdminCaption = `${cb.message.caption || cb.message.text}\n\n❌ *STATUS: DITOLAK ADMIN*`;
     await Promise.all([
@@ -641,13 +633,10 @@ if (data.startsWith("acc_") || data.startsWith("rej_")) {
   }
 
   // Aksi Mod: Persetujuan Menfess
-  await dbIncrementDaily(env, Number(p.userId));
-  const usedBonus = await dbUseReferralBonus(env, Number(p.userId));
-
   const channelMsg = `Menfess dari @KEKprojects_bot\n\n${escapeMd(p.text)}\n\n---`;
   let sentCh;
 
-  // Distribusi Penerbitan Media Konten
+  // 2. Transmisi Konten ke Target Channel Utama (Gunakan object p secara strict)
   if (p.mediaType === "photo") {
     sentCh = await tgRaw(env.BOT_TOKEN, "sendPhoto", { chat_id: env.CHANNEL_ID, photo: p.fileId, caption: channelMsg, parse_mode: "Markdown" });
   } else if (p.mediaType === "video") {
@@ -658,10 +647,13 @@ if (data.startsWith("acc_") || data.startsWith("rej_")) {
     sentCh = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.CHANNEL_ID, text: channelMsg, parse_mode: "Markdown" });
   }
 
-  if (sentCh?.ok) {
-    const chMsgId = sentCh.result.message_id;
+  // 3. Evaluasi ketat hasil kembalian Telegram
+  if (sentCh && sentCh.ok) {
+    // Jalankan konsumsi kuota hanya saat telegram mengonfirmasi pesan sukses terbit
+    await dbIncrementDaily(env, Number(p.userId));
+    await dbUseReferralBonus(env, Number(p.userId));
     
-    // ASYNC HYGIENE: Eksekusi database & pembersihan state dilakukan SETELAH Telegram sukses merespons
+    const chMsgId = sentCh.result.message_id;
     await dbSaveMenfess(env, chMsgId, p.userId, p.senderName, p.text);
     await dbDeletePending(env, pid);
 
@@ -680,17 +672,20 @@ if (data.startsWith("acc_") || data.startsWith("rej_")) {
     await tgRaw(env.BOT_TOKEN, "sendMessage", {
       chat_id: Number(p.userId),
       parse_mode: "Markdown",
-      text: `🚀 *Menfess Anda Berhasil Terbit!*\n\nPesan rahasia Anda telah disetujui oleh admin.`,
+      text: `🚀 *Menfess Anda Berhasil Terbit!*\n\nPesan rahasia Anda telah disetujui oleh admin dan kini sudah mengudara di channel resmi.`,
       reply_markup: {
         inline_keyboard: [[{ text: "📱 Lihat Menfess Kamu", url: postLink }]]
       }
     });
 
+    return api.answer(cbId, "Menfess berhasil dipublikasikan!");
   } else {
-    return api.answer(cbId, "⚠️ Gagal menerbitkan ke channel. Cek izin administrasi bot.", true);
+    // Jika gagal, tampilkan detail log eror asli dari Telegram tanpa menyembunyikannya di balik teks statis
+    const errorDesc = sentCh?.description || "Unknown Telegram API Error";
+    return api.answer(cbId, `⚠️ Gagal ke channel: ${errorDesc}`, true);
   }
-  return api.answer(cbId, "Menfess berhasil dipublikasikan!");
 }
+
 
 
   // Modul Pemrosesan Blokir Langsung Lewat Tombol Dashboard Admin Mod
