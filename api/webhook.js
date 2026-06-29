@@ -29,20 +29,40 @@ const WAITING_MSG    = "🔍 Mencari partner obrolan yang cocok...\nSilakan tung
 // ── Env Validation Core ────────────────────────────────────────────────
 
 function getEnv() {
-  const vars = ["BOT_TOKEN", "KV_URL", "KV_TOKEN", "ADMIN_ID", "CHANNEL_ID", "DAILY_MAX", "AUTO_DEL_MIN", "REF_BONUS", "REF_WELCOME"];
+  // Daftar variabel lingkungan sesuai persis dengan yang ada di Vercel Anda
+  const vars = [
+    "BOT_TOKEN", 
+    "ADMIN_ID", 
+    "CHANNEL_ID", 
+    "DAILY_MAX", 
+    "AUTO_DELETE_MINUTES", 
+    "REFERRAL_BONUS", 
+    "REFERRAL_WELCOME",
+    "BOT_USERNAME",
+    "UPSTASH_REDIS_URL",
+    "UPSTASH_REDIS_TOKEN"
+  ];
+  
   const env = {};
   for (const v of vars) {
     if (!process.env[v]) throw new Error(`Missing environment variable: ${v}`);
     env[v] = process.env[v];
   }
-  // Standardisasi casting tipe data data lingkungan dasar
+
+  // Pemetaan (Mapping) internal agar kompatibel dengan mesin database _db.js
+  env.KV_URL       = env.UPSTASH_REDIS_URL;
+  env.KV_TOKEN     = env.UPSTASH_REDIS_TOKEN;
+  env.AUTO_DEL_MIN = Number(env.AUTO_DELETE_MINUTES);
+  env.REF_BONUS    = Number(env.REFERRAL_BONUS);
+  env.REF_WELCOME  = Number(env.REFERRAL_WELCOME);
+
+  // Standardisasi casting tipe data angka
   env.ADMIN_ID     = Number(env.ADMIN_ID);
   env.DAILY_MAX    = Number(env.DAILY_MAX);
-  env.AUTO_DEL_MIN = Number(env.AUTO_DEL_MIN);
-  env.REF_BONUS    = Number(env.REF_BONUS);
-  env.REF_WELCOME  = Number(env.REF_WELCOME);
+  
   return env;
 }
+
 
 // ── Telegram Native Raw Request Handler (Async Hygiene Protocol) ───────
 
