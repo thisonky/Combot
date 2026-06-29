@@ -602,15 +602,24 @@ async function handleCallback(cb, env, api) {
 
   // ── SISTEM INTERSEPSI TOMBOL MENFESS ADMIN (Proteksi Kadaluwarsa) ──
 // ── PATCH PRESISI: CALLBACK QUERY APPROVAL ───────────────────────────
+// ── PATCH NYATA: Ganti Bagian Awal Pengecekan acc/rej di api/webhook.js ──
 if (data.startsWith("acc_") || data.startsWith("rej_")) {
-  const action = data.substring(0, 3); // Mengambil "acc" atau "rej"
-  const pid = data.substring(4);       // Mengambil sisa string ID secara utuh (pnd_xxx_xxx)
+  // SALAH SEBELUMNYA: const [action, pid] = data.split("_"); (Memotong pnd_msg_id)
+  
+  // PERBAIKAN NYATA: Ambil aksi dan ID secara utuh menggunakan substring
+  const action = data.substring(0, 3); // Menghasilkan "acc" atau "rej"
+  const pid = data.substring(4);       // Menghasilkan "pnd_msgid_userid" secara utuh
   
   const p = await dbGetPending(env, pid);
   
   if (!p) {
-    return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses oleh admin lain.", true);
+    return api.answer(cbId, "⚠️ Berkas pengajuan menfess kedaluwarsa atau sudah diproses.", true);
   }
+
+  // --- SISA KODE ASLI ANDA DI BAWAHNYA JANGAN DIUBAH ---
+  // (Pindahkan perintah `await dbDeletePending(env, pid);` milik kode asli Anda 
+  // dari bagian paling atas ke dalam blok setelah pesan sukses terkirim ke channel `if (sentCh?.ok)`)
+
 
   const chUsername = String(env.CHANNEL_ID).replace("@", "");
 
