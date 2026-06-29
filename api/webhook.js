@@ -801,9 +801,118 @@ async function handleAdminHelp(chatId, api) {
 }
 
 // ── Empty Handlers For Dynamic Failover Compliance ─────────────────────
+
+// 1. Direct Engine State Storage (Menggunakan REST API Upstash bawaan env Anda)
+async function redisSetContact(env, uid, state) {
+  await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["SET", `contact_mode:${uid}`, state, "EX", 3600]) });
+}
+async function redisGetContact(env, uid) {
+  const res = await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["GET", `contact_mode:${uid}`]) });
+  const data = await res.json();
+  return data?.result || null;
+}
+async function redisDelContact(env, uid) {
+  await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["DEL", `contact_mode:${uid}`]) });
+}
+
+async function redisSetReportPending(env, uid, partnerId) {
+  await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["SET", `report_pending:${uid}`, String(partnerId), "EX", 3600]) });
+}
+async function redisGetReportPending(env, uid) {
+  const res = await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["GET", `report_pending:${uid}`]) });
+  const data = await res.json();
+  return data?.result || null;
+}
+async function redisDelReportPending(env, uid) {
+  await fetch(env.KV_URL, { method: "POST", headers: { Authorization: `Bearer ${env.KV_TOKEN}` }, body: JSON.stringify(["DEL", `report_pending:${uid}`]) });
+}
+
+// 2. Fungsi Fitur Hubungi Admin
+async function handleContactMenu(userId, uidNum, chatId, env, api) {
+  await redisSetContact(env, uidNum, "active");
+  return api.send({ 
+    chat_id: chatId, 
+    text: "📬 *Mode Hubungi Admin Aktif*\n\nSilakan ketik pertanyaan atau keluhan Anda sekarang. Pesan selanjutnya akan langsung diteruskan ke admin.\n\n_Ketik /batal untuk membatalkan._", 
+    parse_mode: "Markdown" 
+  });
+}
+
+async function handleContactRelay(msg, uidNum, chatId, env, api) {
+  const text = (msg.text || msg.caption || "").trim();
+  if (text.toLowerCase() === "/batal") {
+    await redisDelContact(env, uidNum);
+    return api.send({ chat_id: chatId, text: "❌ Pengiriman pesan ke admin dibatalkan." });
+  }
+
+  const adminMsg = `📬 <b>PESAN DARI USER</b>\n🆔 ID: <code>${uidNum}</code>\n👤 Nama: ${msg.from.first_name || "User"}\n\n📝 Pesan:\n${text}`;
+  const sent = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, text: adminMsg, parse_mode: "HTML" });
+  
+  if (sent?.ok) {
+    await redisDelContact(env, uidNum);
+    return api.send({ chat_id: chatId, text: "✅ Pesan Anda telah dikirim ke Admin. Silakan tunggu balasan." });
+  }
+}
+
+// 3. Fungsi Balas Pesan dari Admin ke User (Dua Arah Nyata)
+async function handleAdminReply(msg, env, api) {
+  const replyTo = msg.reply_to_message;
+  if (!replyTo) return false;
+  
+  const textToScan = replyTo.text || replyTo.caption || "";
+  // Cari ID user dari baris "🆔 ID: XXXXXXX" menggunakan regex match murni
+  const match = textToScan.match(/🆔 ID:\s*(\d+)/) || textToScan.match(/ID:\s*(\d+)/);
+  if (!match) return false;
+  
+  const targetUserId = Number(match[1]);
+  const replyText = (msg.text || msg.caption || "").trim();
+  if (!replyText) return false;
+
+  const sent = await tgRaw(env.BOT_TOKEN, "sendMessage", {
+    chat_id: targetUserId,
+    text: `💬 <b>Balasan dari Admin:</b>\n\n${replyText}`,
+    parse_mode: "HTML"
+  });
+
+  if (sent?.ok) {
+    await tgRaw(env.BOT_TOKEN, "sendMessage", {
+      chat_id: msg.chat.id,
+      text: `✅ Balasan terkirim ke user <code>${targetUserId}</code>`,
+      parse_mode: "HTML",
+      reply_to_message_id: msg.message_id
+    });
+    return true;
+  }
+  return false;
+}
+
+// 4. Fungsi Fitur Laporkan User
+async function handleReportMenu(userId, uidNum, chatId, env, api) {
+  const sess = await acGetSession(env, userId);
+  if (!sess || !sess.partnerId) {
+    return api.send({ chat_id: chatId, text: "⚠️ Anda hanya bisa melaporkan pengguna saat berada dalam sesi obrolan aktif." });
+  }
+
+  await redisSetReportPending(env, uidNum, sess.partnerId);
+  return api.send({ 
+    chat_id: chatId, 
+    text: "🚨 *Mode Laporan Aktif*\n\nSilakan ketik alasan melaporkan partner obrolan Anda.\n\n_Ketik /batal untuk membatalkan._", 
+    parse_mode: "Markdown" 
+  });
+}
+
+async function submitReport(uidNum, chatId, partnerId, text, env, api) {
+  const adminMsg = `🚨 <b>LAPORAN ANONYMOUS CHAT</b>\n\n🚩 Pelapor: <code>${uidNum}</code>\n🎯 Terlapor: <code>${partnerId}</code>\n\n📝 Alasan:\n${text}`;
+  await tgRaw(env.BOT_TOKEN, "sendMessage", { 
+    chat_id: env.ADMIN_ID, 
+    text: adminMsg, 
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [[{ text: "🚫 Ban Terlapor", callback_data: `ban_${partnerId}` }]]
+    }
+  });
+  return api.send({ chat_id: chatId, text: "✅ Laporan Anda telah diterima oleh Admin. Terima kasih!" });
+}
+
+// 5. Status Keanggotaan Chat (Biarkan kosong agar tidak melemparkan eror crash)
 async function handleMyChatMember() {}
-async function handleAdminReply() { return false; }
-async function handleContactRelay() {}
-async function handleReportMenu() {}
-async function handleContactMenu() {}
-async function submitReport() {}
+
