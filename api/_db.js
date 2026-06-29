@@ -2,6 +2,10 @@
 // Upstash Redis via REST API Engine — Production Hardened Version
 // Mengamankan Concurrency, Atomisitas Antrean, & JSON Deserialization Stability
 
+// api/_db.js — Combo Bot Engine (Anonymous Chat + Menfess)
+// Upstash Redis via REST API Engine — Production Hardened Version
+// Mengamankan Concurrency, Atomisitas Antrean, & JSON Deserialization Stability
+
 const REDIS_TIMEOUT_MS = 5000;
 
 // ── Redis Core Network Engine ──────────────────────────────────────────
@@ -9,21 +13,11 @@ const REDIS_TIMEOUT_MS = 5000;
 async function redisCmd(env, ...args) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REDIS_TIMEOUT_MS);
-  
-  // Amankan deteksi variasi nama variabel lingkungan Vercel
-  const redisUrl = env.UPSTASH_REDIS_URL || env.KV_URL;
-  const redisToken = env.UPSTASH_REDIS_TOKEN || env.KV_TOKEN;
-
-  if (!redisUrl || !redisToken) {
-    console.error("Redis Configuration Error: Missing URL or Token");
-    return null;
-  }
-
   try {
-    const res = await fetch(redisUrl, {
+    const res = await fetch(env.KV_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${redisToken}`,
+        Authorization: `Bearer ${env.KV_TOKEN}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(args),
@@ -41,25 +35,20 @@ async function redisCmd(env, ...args) {
 
 async function redisGet(env, key) {
   const result = await redisCmd(env, "GET", key);
-  if (result === null || result === undefined) return null;
+  if (result === null) return null;
   if (typeof result !== "string") return result;
-  
-  // Pastikan hanya mem-parse string yang berpotensi berupa objek/array JSON
-  const trimmed = result.trim();
-  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return trimmed;
-  
+  if (!result.startsWith("{") && !result.startsWith("[")) return result;
   try { 
-    return JSON.parse(trimmed); 
-  } catch (err) { 
-    console.error(`Failed to parse JSON for key ${key}:`, err.message);
-    return trimmed; 
+    return JSON.parse(result); 
+  } catch { 
+    return result; 
   }
 }
 
 async function redisSet(env, key, value, exSeconds) {
   const val = typeof value === "string" ? value : JSON.stringify(value);
-  if (exSeconds && !isNaN(Number(exSeconds))) {
-    await redisCmd(env, "SET", key, val, "EX", Number(exSeconds));
+  if (exSeconds) {
+    await redisCmd(env, "SET", key, val, "EX", exSeconds);
   } else {
     await redisCmd(env, "SET", key, val);
   }
@@ -92,7 +81,7 @@ export async function dbAllUserIds(env) {
   return Array.isArray(members) ? members : [];
 }
 
-// ── ATOMIC QUEUE ENGINE ────────────────────────────────────────────────
+// ── ATOMIC QUEUE ENGINE (Perbaikan Mutlak Concurrency P0) ──────────────
 
 export async function acGetQueue(env) {
   const q = await redisCmd(env, "LRANGE", "ac_search_queue", 0, -1);
@@ -182,6 +171,7 @@ export async function dbUnmute(env, uid) {
 }
 
 export async function dbCountMuted(env) {
+  // Metode scan keys khusus mute aktif untuk statistik internal
   const keys = await redisCmd(env, "KEYS", "ac_mute:*");
   return Array.isArray(keys) ? keys.length : 0;
 }
@@ -255,11 +245,11 @@ export async function dbCountMenfess(env) {
   return Number(await redisCmd(env, "SCARD", "mf_msg_set")) || 0;
 }
 
-// ── FIXED PENUMBUH DATA PENDING MENFESS (Akar Masalah Solved) ━━━━━━━━━
+// ── Pending State Menfess Approval Database ───────────────────────────
 
 export async function dbSavePending(env, pendingId, data) { 
-  // Ditulis eksplisit menggunakan durasi aman 48 jam (172800 detik) 
-  // Menepis eror akibat kegagalan konversi otomatis atau nilai kedaluwarsa terlalu cepat
+  // Ditulis ulang menggunakan 48 jam (172800 detik) demi mencegah 
+  // hilangnya state pending antrean secara mendadak saat admin meninjau
   await redisSet(env, `mf_pending:${pendingId}`, data, 172800); 
 }
 
@@ -271,7 +261,7 @@ export async function dbDeletePending(env, pendingId) {
   await redisDel(env, `mf_pending:${pendingId}`); 
 }
 
-// ── ATOMIC REFERRAL TRACKING ──────────────────────────────────────────
+// ── ATOMIC REFERRAL TRACKING (Perbaikan Race Condition P1) ─────────────
 
 export async function dbGetReferralBonus(env, uid) {
   return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0;
