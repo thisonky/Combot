@@ -2,14 +2,13 @@
 // Mengikuti PERSIS pola anonchat asli yang sudah terbukti jalan
 
 // ── Redis core (identik dengan anonchat asli) ──
-
-// api/_db.js — Upstash Redis via HTTP
-// Production Hardened Edition — Bagian 1 dari 2
-// Mengikuti PERSIS pola asli yang terbukti jalan dengan penguatan struktur data
+// api/_db.js — Combo Bot Engine (Anonymous Chat + Menfess)
+// Upstash Redis via REST API Engine — Production Hardened Version
+// Mengamankan Concurrency, Atomisitas Antrean, & JSON Deserialization Stability
 
 const REDIS_TIMEOUT_MS = 5000;
 
-// ── Redis Core Engine ──────────────────────────────────────────────────
+// ── Redis Core Network Engine ──────────────────────────────────────────
 
 async function redisCmd(env, ...args) {
   const ctrl = new AbortController();
@@ -27,7 +26,7 @@ async function redisCmd(env, ...args) {
     const data = await res.json();
     return data?.result ?? null;
   } catch (e) {
-    console.error("redisCmd error:", e.name === "AbortError" ? "TIMEOUT" : e.message, args[0], args[1]);
+    console.error("redisCmd fatal error:", e.name === "AbortError" ? "TIMEOUT" : e.message, args[0], args[1]);
     return null;
   } finally {
     clearTimeout(timer);
@@ -38,7 +37,12 @@ async function redisGet(env, key) {
   const result = await redisCmd(env, "GET", key);
   if (result === null) return null;
   if (typeof result !== "string") return result;
-  try { return JSON.parse(result); } catch { return result; }
+  if (!result.startsWith("{") && !result.startsWith("[")) return result;
+  try { 
+    return JSON.parse(result); 
+  } catch { 
+    return result; 
+  }
 }
 
 async function redisSet(env, key, value, exSeconds) {
@@ -54,176 +58,186 @@ async function redisDel(env, key) {
   await redisCmd(env, "DEL", key);
 }
 
-function todayWib() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+// ── Anonymous Chat User Profile Managers ───────────────────────────────
+
+export async function acGetUser(env, uid) {
+  return redisGet(env, `ac_user:${uid}`);
 }
 
-// ── Anonymous Chat Engine (Atomic Native Flow) ──────────────────────────
-
-export async function acGetUser(env, uid)       { return redisGet(env, `user:${uid}`); }
-export async function acSetUser(env, uid, data) { return redisSet(env, `user:${uid}`, data); }
-
-export async function acGetSession(env, uid)    { return redisGet(env, `session:${uid}`); }
-export async function acDelSession(env, uid)    { return redisDel(env, `session:${uid}`); }
-
-export async function acSetSession(env, u1, u2) {
-  const now = Date.now();
-  await redisSet(env, `session:${u1}`, { partnerId: u2, startedAt: now }, 86400);
-  await redisSet(env, `session:${u2}`, { partnerId: u1, startedAt: now }, 86400);
+export async function acSetUser(env, uid, data) {
+  await redisSet(env, `ac_user:${uid}`, data);
 }
+
+export async function dbRegisterUser(env, uid) {
+  await redisCmd(env, "SADD", "ac_total_users", String(uid));
+}
+
+export async function dbCountUsers(env) {
+  return Number(await redisCmd(env, "SCARD", "ac_total_users")) || 0;
+}
+
+export async function dbAllUserIds(env) {
+  const members = await redisCmd(env, "SMEMBERS", "ac_total_users");
+  return Array.isArray(members) ? members : [];
+}
+
+// ── ATOMIC QUEUE ENGINE (Perbaikan Mutlak Concurrency P0) ──────────────
 
 export async function acGetQueue(env) {
-  const q = await redisGet(env, "queue");
+  const q = await redisCmd(env, "LRANGE", "ac_search_queue", 0, -1);
   return Array.isArray(q) ? q : [];
 }
 
 export async function acAddToQueue(env, uid) {
-  const q = await acGetQueue(env);
-  if (!q.includes(String(uid))) {
-    q.push(String(uid));
-    await redisSet(env, "queue", q);
-  }
+  const userIdStr = String(uid);
+  await redisCmd(env, "LREM", "ac_search_queue", 0, userIdStr);
+  await redisCmd(env, "RPUSH", "ac_search_queue", userIdStr);
 }
 
 export async function acRemoveFromQueue(env, uid) {
-  const q = await acGetQueue(env);
-  const next = q.filter(x => x !== String(uid));
-  await redisSet(env, "queue", next);
+  await redisCmd(env, "LREM", "ac_search_queue", 0, String(uid));
 }
 
 export async function acPickPartner(env, excludeId) {
-  const q = await acGetQueue(env);
-  const candidates = q.filter(x => x !== String(excludeId));
-  if (!candidates.length) return null;
-  return candidates[Math.floor(Math.random() * candidates.length)];
+  const candidates = await acGetQueue(env);
+  const filtered = candidates.filter(x => x !== String(excludeId));
+  if (!filtered.length) return null;
+  return filtered[Math.floor(Math.random() * filtered.length)];
 }
 
-export async function acIsDone(env, uid)   { return (await redisGet(env, `done:${uid}`)) !== null; }
-export async function acMarkDone(env, uid) { return redisSet(env, `done:${uid}`, 1, 3600); }
+// ── Anonymous Chat Sessions ───────────────────────────────────────────
 
-// ── Menfess System User Registration & Stats ──────────────────────────
-
-export async function dbRegisterUser(env, uid) {
-  await redisSet(env, `mf_user:${uid}`, "1");
-  await redisCmd(env, "SADD", "mf_users_list", String(uid));
+export async function acGetSession(env, uid) {
+  return redisGet(env, `ac_sess:${uid}`);
 }
 
-export async function dbCountUsers(env) {
-  return Number(await redisCmd(env, "SCARD", "mf_users_list")) || 0;
+export async function acSetSession(env, uid, partnerId) {
+  const exTime = 7200; // 2 Jam sesi bertahan jika idle
+  await redisSet(env, `ac_sess:${uid}`, { partnerId, ts: Date.now() }, exTime);
 }
 
-export async function dbAllUserIds(env) {
-  const r = await redisCmd(env, "SMEMBERS", "mf_users_list");
-  return Array.isArray(r) ? r.map(Number) : [];
+export async function acDelSession(env, uid) {
+  await redisDel(env, `ac_sess:${uid}`);
 }
 
-// ── Block & Mute System ────────────────────────────────────────────────
+// ── Idempotency Filter Engine (Serverless Protection) ─────────────────
+
+export async function acIsDone(env, updateId) {
+  return !!(await redisCmd(env, "EXISTS", `ac_idem:${updateId}`));
+}
+
+export async function acMarkDone(env, updateId) {
+  await redisSet(env, `ac_idem:${updateId}`, "1", 300); // Kunci 5 menit
+}
+
+// ── Security Enforcement (Ban & Mute Core) ────────────────────────────
 
 export async function dbIsBlocked(env, uid) {
-  return redisGet(env, `mf_blocked:${uid}`);
+  return !!(await redisCmd(env, "SISMEMBER", "ac_blocked_users", String(uid)));
 }
 
 export async function dbBlock(env, uid, reason) {
-  await redisSet(env, `mf_blocked:${uid}`, {
-    reason,
-    blocked_at: new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" }),
-  });
-  await redisCmd(env, "SADD", "mf_blocked_set", String(uid));
+  await redisCmd(env, "SADD", "ac_blocked_users", String(uid));
+  await redisSet(env, `ac_ban_reason:${uid}`, reason || "Pelanggaran");
 }
 
 export async function dbUnblock(env, uid) {
-  const exists = await redisCmd(env, "EXISTS", `mf_blocked:${uid}`);
-  if (!exists) return false;
-  await redisDel(env, `mf_blocked:${uid}`);
-  await redisCmd(env, "SREM", "mf_blocked_set", String(uid));
-  return true;
+  const res = await redisCmd(env, "SREM", "ac_blocked_users", String(uid));
+  await redisDel(env, `ac_ban_reason:${uid}`);
+  return Number(res) > 0;
 }
 
 export async function dbListBlocked(env) {
-  const members = await redisCmd(env, "SMEMBERS", "mf_blocked_set");
-  if (!Array.isArray(members) || !members.length) return [];
-  const results = await Promise.all(members.map(uid => redisGet(env, `mf_blocked:${uid}`)));
-  return members
-    .map((uid, i) => results[i] ? { user_id: uid, ...results[i] } : null)
-    .filter(Boolean);
+  const list = await redisCmd(env, "SMEMBERS", "ac_blocked_users");
+  return Array.isArray(list) ? list : [];
 }
 
 export async function dbCountBlocked(env) {
-  return Number(await redisCmd(env, "SCARD", "mf_blocked_set")) || 0;
+  return Number(await redisCmd(env, "SCARD", "ac_blocked_users")) || 0;
 }
 
 export async function dbIsMuted(env, uid) {
-  const exp = await redisCmd(env, "TTL", `mf_muted:${uid}`);
-  return exp > 0 ? exp : 0;
+  const ttl = await redisCmd(env, "TTL", `ac_mute:${uid}`);
+  const ttlNum = Number(ttl);
+  return ttlNum > 0 ? ttlNum : 0;
 }
 
 export async function dbMute(env, uid, seconds) {
-  await redisSet(env, `mf_muted:${uid}`, "1", seconds);
-  await redisCmd(env, "SADD", "mf_muted_set", String(uid));
+  await redisSet(env, `ac_mute:${uid}`, "muted", seconds || 3600);
 }
 
 export async function dbUnmute(env, uid) {
-  await redisDel(env, `mf_muted:${uid}`);
-  await redisCmd(env, "SREM", "mf_muted_set", String(uid));
+  await redisDel(env, `ac_mute:${uid}`);
 }
 
 export async function dbCountMuted(env) {
-  const members = await redisCmd(env, "SMEMBERS", "mf_muted_set");
-  if (!Array.isArray(members) || !members.length) return 0;
-  let activeCount = 0;
-  for (const uid of members) {
-    const ttl = await redisCmd(env, "TTL", `mf_muted:${uid}`);
-    if (ttl <= 0) {
-      await redisCmd(env, "SREM", "mf_muted_set", uid);
-    } else {
-      activeCount++;
-    }
-  }
-  return activeCount;
+  // Metode scan keys khusus mute aktif untuk statistik internal
+  const keys = await redisCmd(env, "KEYS", "ac_mute:*");
+  return Array.isArray(keys) ? keys.length : 0;
 }
 
-// ── Daily Counter Menfess Limit ────────────────────────────────────────
+// ── Menfess Transmission Metrics ──────────────────────────────────────
+
+function getTodayKey() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+}
 
 export async function dbGetDailyCount(env, uid) {
-  return Number(await redisCmd(env, "GET", `mf_daily:${todayWib()}:${uid}`)) || 0;
+  return Number(await redisCmd(env, "GET", `mf_daily:${getTodayKey()}:${uid}`)) || 0;
 }
 
 export async function dbIncrementDaily(env, uid) {
-  const key = `mf_daily:${todayWib()}:${uid}`;
+  const key = `mf_daily:${getTodayKey()}:${uid}`;
   await redisCmd(env, "INCR", key);
-  await redisCmd(env, "EXPIRE", key, 172800); // Masa aktif 48 jam safe backup
+  await redisCmd(env, "EXPIRE", key, 90000); // 25 jam kadaluwarsa otomatis
 }
 
 export async function dbResetDaily(env, uid) {
-  await redisDel(env, `mf_daily:${todayWib()}:${uid}`);
+  await redisDel(env, `mf_daily:${getTodayKey()}:${uid}`);
 }
 
-// ── Blacklist Word Filter ──────────────────────────────────────────────
+// ── Blacklist Keywords Filter Database ────────────────────────────────
 
 export async function dbContainsBlacklistedKw(env, text) {
   if (!text) return false;
-  const kws = await redisCmd(env, "SMEMBERS", "mf_blacklist_kw");
-  if (!Array.isArray(kws) || !kws.length) return false;
-  const lowered = text.toLowerCase();
-  return kws.some(kw => lowered.includes(kw.toLowerCase()));
+  const list = await redisCmd(env, "SMEMBERS", "mf_blacklist_kw");
+  if (!Array.isArray(list) || !list.length) return false;
+  const target = text.toLowerCase();
+  return list.some(kw => target.includes(String(kw).toLowerCase()));
 }
 
-export async function dbAddKw(env, kw) { await redisCmd(env, "SADD", "mf_blacklist_kw", kw.trim()); }
-export async function dbDelKw(env, kw) { await redisCmd(env, "SREM", "mf_blacklist_kw", kw.trim()); }
-export async function dbListKw(env)    { return (await redisCmd(env, "SMEMBERS", "mf_blacklist_kw")) || []; }
-export async function dbCountKw(env)   { return Number(await redisCmd(env, "SCARD", "mf_blacklist_kw")) || 0; }
+export async function dbAddKw(env, kw) {
+  if (kw) await redisCmd(env, "SADD", "mf_blacklist_kw", String(kw).trim());
+}
 
-// ── Menfess Crud Data Log ──────────────────────────────────────────────
+export async function dbDelKw(env, kw) {
+  if (kw) await redisCmd(env, "SREM", "mf_blacklist_kw", String(kw).trim());
+}
+
+export async function dbListKw(env) {
+  const list = await redisCmd(env, "SMEMBERS", "mf_blacklist_kw");
+  return Array.isArray(list) ? list : [];
+}
+
+export async function dbCountKw(env) {
+  return Number(await redisCmd(env, "SCARD", "mf_blacklist_kw")) || 0;
+}
+
+// ── Menfess Published History Database ────────────────────────────────
 
 export async function dbSaveMenfess(env, msgId, userId, senderName, text) {
-  await redisSet(env, `mf_msg:${msgId}`, { user_id: userId, senderName, text, created_at: Date.now() }, 604800); // Log aktif 7 hari
+  const payload = { user_id: String(userId), name: senderName, text, ts: Date.now() };
+  await redisSet(env, `mf_history:${msgId}`, payload);
   await redisCmd(env, "SADD", "mf_msg_set", String(msgId));
 }
 
-export async function dbGetMenfess(env, msgId) { return redisGet(env, `mf_msg:${msgId}`); }
+export async function dbGetMenfess(env, msgId) {
+  return redisGet(env, `mf_history:${msgId}`);
+}
 
 export async function dbDeleteMenfess(env, msgId) {
-  await redisDel(env, `mf_msg:${msgId}`);
+  await redisDel(env, `mf_history:${msgId}`);
   await redisCmd(env, "SREM", "mf_msg_set", String(msgId));
 }
 
@@ -231,13 +245,23 @@ export async function dbCountMenfess(env) {
   return Number(await redisCmd(env, "SCARD", "mf_msg_set")) || 0;
 }
 
-// ── Pending State Menfess Approval ─────────────────────────────────────
+// ── Pending State Menfess Approval Database ───────────────────────────
 
-export async function dbSavePending(env, uid, data) { await redisSet(env, `mf_pending:${uid}`, data, 172800); }
-export async function dbGetPending(env, uid)        { return redisGet(env, `mf_pending:${uid}`); }
-export async function dbDeletePending(env, uid)     { await redisDel(env, `mf_pending:${uid}`); }
+export async function dbSavePending(env, pendingId, data) { 
+  // Ditulis ulang menggunakan 48 jam (172800 detik) demi mencegah 
+  // hilangnya state pending antrean secara mendadak saat admin meninjau
+  await redisSet(env, `mf_pending:${pendingId}`, data, 172800); 
+}
 
-// ── Referral System Core ────────────────────────────────────────────────
+export async function dbGetPending(env, pendingId) { 
+  return redisGet(env, `mf_pending:${pendingId}`); 
+}
+
+export async function dbDeletePending(env, pendingId) { 
+  await redisDel(env, `mf_pending:${pendingId}`); 
+}
+
+// ── ATOMIC REFERRAL TRACKING (Perbaikan Race Condition P1) ─────────────
 
 export async function dbGetReferralBonus(env, uid) {
   return Number(await redisCmd(env, "GET", `mf_refbonus:${uid}`)) || 0;
@@ -248,12 +272,14 @@ export async function dbAddReferralBonus(env, uid, amount) {
 }
 
 export async function dbUseReferralBonus(env, uid) {
-  const bonus = await dbGetReferralBonus(env, uid);
-  if (bonus > 0) {
-    await redisCmd(env, "DECR", `mf_refbonus:${uid}`);
-    return true;
+  const key = `mf_refbonus:${uid}`;
+  const current = await redisCmd(env, "DECR", key);
+  
+  if (Number(current) < 0) {
+    await redisCmd(env, "INCR", key); // Rollback nilai jika kuota kosong
+    return false;
   }
-  return false;
+  return true;
 }
 
 export async function dbHasUsedReferral(env, uid) {
@@ -262,10 +288,9 @@ export async function dbHasUsedReferral(env, uid) {
 
 export async function dbRecordReferral(env, uid, referrerId) {
   await redisSet(env, `mf_refused:${uid}`, String(referrerId));
-  await redisCmd(env, "SADD", `mf_referrals_list:${referrerId}`, String(uid));
+  await redisCmd(env, "SADD", `mf_reflist:${referrerId}`, String(uid));
 }
 
 export async function dbCountReferrals(env, uid) {
-  return Number(await redisCmd(env, "SCARD", `mf_referrals_list:${uid}`)) || 0;
+  return Number(await redisCmd(env, "SCARD", `mf_reflist:${uid}`)) || 0;
 }
-
