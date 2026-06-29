@@ -153,6 +153,7 @@ async function redisDelReportPending(env, uid)    { await redisRaw(env, "DEL", `
 
 // ── Webhook Main Request Routing Handler ────────────────────────────────
 
+// api/webhook.js — Perbaikan Handler Utama
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(200).json({ ok: true, status: "Combo Bot Engine running" });
@@ -164,10 +165,16 @@ export default async function handler(req, res) {
     const env = getEnv();
     const api = tg(env.BOT_TOKEN);
 
-    // Proteksi Idempotensi (Anti Duplikasi Update Serverless)
-    const updateKey = String(update.update_id);
-    if (await acIsDone(env, updateKey)) return res.status(200).json({ ok: true });
-    await acMarkDone(env, updateKey);
+    // ── 🔥 PERBAIKAN IDEMPOTENSI ───────────────────────────────────────
+    // Hanya kunci update_id jika itu berupa MESSAGE (pesan baru dari user).
+    // Jangan kunci jika itu berupa CALLBACK_QUERY (klik tombol admin), 
+    // karena bisa memicu tabrakan state di Vercel Serverless.
+    if (update.message) {
+      const updateKey = `up_msg:${update.update_id}`;
+      if (await acIsDone(env, updateKey)) return res.status(200).json({ ok: true });
+      await acMarkDone(env, updateKey);
+    }
+    // ──────────────────────────────────────────────────────────────────
 
     if (update.callback_query) {
       await handleCallback(update.callback_query, env, api);
@@ -194,6 +201,7 @@ export default async function handler(req, res) {
   }
   return res.status(200).json({ ok: true });
 }
+
 
 // ── Telegram Kicked/Block Status Tracking ──────────────────────────────
 
