@@ -163,16 +163,25 @@ export default async function handler(req, res) {
   return res.status(200).json({ ok: true });
 }
 
-// ── Temporary Redis Contact State Fallbacks ────────────────────────────
+// ── Direct Redis Engine Client (Upstash REST API - ANTI REFERENCE ERROR) ──
+async function redisRaw(env, ...args) {
+  try {
+    const res = await fetch(env.KV_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.KV_TOKEN}` },
+      body: JSON.stringify(args)
+    });
+    const data = await res.json();
+    return data?.result || null;
+  } catch (e) {
+    console.error("redisRaw Network/Auth Error:", e);
+    return null;
+  }
+}
 
 async function redisGetContact(env, uid) {
-  return await tgRaw(env.BOT_TOKEN, "getChat", { chat_id: uid }).then(async () => {
-    const s = await tgRaw(env.BOT_TOKEN, "getArgsFall", { uid }); 
-    return s?.result || null; 
-  }).catch(() => null);
+  return await redisRaw(env, "GET", `contact_mode:${uid}`);
 }
-// api/webhook.js — Combo Bot v1.0 (Anonymous Chat + Menfess)
-// Production Hardened Edition — Bagian 2 dari 3
 
 // ── Core Message Router & Admin Command Interceptor ────────────────────
 
@@ -469,23 +478,102 @@ async function handleRelay(msg, userId, chatId, acUser, env, api) {
   }
 }
 
-// ── Fallback Database Functions for Report Pending State ──────────────
-
+// ── Database Functions for Report Pending State ────────────────────────
 async function redisGetReportPending(env, uid) {
-  const p = await tgRaw(env.BOT_TOKEN, "getChat", { chat_id: uid }).then(async () => {
-    const r = await tgRaw(env.BOT_TOKEN, "getArgsFallRep", { uid });
-    return r?.result || null;
-  }).catch(() => null);
-  return p;
+  return await redisRaw(env, "GET", `report_pending:${uid}`);
 }
 
 async function redisDelReportPending(env, uid) {
-  // Pembersihan state internal fallback report
+  return await redisRaw(env, "DEL", `report_pending:${uid}`);
 }
-// api/webhook.js — Combo Bot v1.0 (Anonymous Chat + Menfess)
-// Production Hardened Edition — Bagian 3 dari 3 (Final)
 
-// ── Menfess Core Ingestion Engine ──────────────────────────────────────
+// ── CORE FUNCTIONAL FEATURE HANDLERS ───────────────────────────────────
+
+async function handleContactMenu(userId, uidNum, chatId, env, api) {
+  await redisRaw(env, "SET", `contact_mode:${uidNum}`, "active", "EX", 3600);
+  return api.send({ 
+    chat_id: chatId, 
+    text: "📬 *Mode Hubungi Admin Aktif*\n\nSilakan ketik pertanyaan atau keluhan Anda sekarang. Pesan selanjutnya akan langsung diteruskan ke admin.\n\n_Ketik /batal untuk membatalkan._", 
+    parse_mode: "Markdown" 
+  });
+}
+
+async function handleContactRelay(msg, uidNum, chatId, env, api) {
+  const text = (msg.text || msg.caption || "").trim();
+  if (text.toLowerCase() === "/batal") {
+    await redisRaw(env, "DEL", `contact_mode:${uidNum}`);
+    return api.send({ chat_id: chatId, text: "❌ Pengiriman pesan ke admin dibatalkan." });
+  }
+
+  const adminMsg = `📬 <b>PESAN DARI USER</b>\n🆔 ID: <code>${uidNum}</code>\n👤 Nama: ${msg.from.first_name || "User"}\n\n📝 Pesan:\n${text}`;
+  const sent = await tgRaw(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_ID, text: adminMsg, parse_mode: "HTML" });
+  
+  if (sent?.ok) {
+    await redisRaw(env, "DEL", `contact_mode:${uidNum}`);
+    return api.send({ chat_id: chatId, text: "✅ Pesan Anda telah dikirim ke Admin. Silakan tunggu balasan." });
+  }
+}
+
+async function handleAdminReply(msg, env, api) {
+  const replyTo = msg.reply_to_message;
+  if (!replyTo) return false;
+  
+  const textToScan = replyTo.text || replyTo.caption || "";
+  const match = textToScan.match(/🆔 ID:\s*(\d+)/) || textToScan.match(/ID:\s*(\d+)/);
+  if (!match) return false;
+  
+  const targetUserId = Number(match[1]);
+  const replyText = (msg.text || msg.caption || "").trim();
+  if (!replyText) return false;
+
+  const sent = await tgRaw(env.BOT_TOKEN, "sendMessage", {
+    chat_id: targetUserId,
+    text: `💬 <b>Balasan dari Admin:</b>\n\n${replyText}`,
+    parse_mode: "HTML"
+  });
+
+  if (sent?.ok) {
+    await tgRaw(env.BOT_TOKEN, "sendMessage", {
+      chat_id: msg.chat.id,
+      text: `✅ Balasan terkirim ke user <code>${targetUserId}</code>`,
+      parse_mode: "HTML",
+      reply_to_message_id: msg.message_id
+    });
+    return true;
+  }
+  return false;
+}
+
+async function handleReportMenu(userId, uidNum, chatId, env, api) {
+  const sess = await acGetSession(env, userId);
+  if (!sess || !sess.partnerId) {
+    return api.send({ chat_id: chatId, text: "⚠️ Anda hanya bisa melaporkan pengguna saat berada dalam sesi obrolan aktif." });
+  }
+
+  await redisRaw(env, "SET", `report_pending:${uidNum}`, String(sess.partnerId), "EX", 3600);
+  return api.send({ 
+    chat_id: chatId, 
+    text: "🚨 *Mode Laporan Aktif*\n\nSilakan ketik alasan melaporkan partner obrolan Anda.\n\n_Ketik /batal untuk membatalkan._", 
+    parse_mode: "Markdown" 
+  });
+}
+
+async function submitReport(uidNum, chatId, partnerId, text, env, api) {
+  const adminMsg = `🚨 <b>LAPORAN ANONYMOUS CHAT</b>\n\n🚩 Pelapor: <code>${uidNum}</code>\n🎯 Terlapor: <code>${partnerId}</code>\n\n📝 Alasan:\n${text}`;
+  await tgRaw(env.BOT_TOKEN, "sendMessage", { 
+    chat_id: env.ADMIN_ID, 
+    text: adminMsg, 
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [[{ text: "🚫 Ban Terlapor", callback_data: `ban_${partnerId}` }]]
+    }
+  });
+  
+  await redisRaw(env, "DEL", `report_pending:${uidNum}`);
+  return api.send({ chat_id: chatId, text: "✅ Laporan Anda telah diterima oleh Admin. Terima kasih!" });
+}
+
+async function handleMyChatMember() {}
 
 async function handleMenfess(msg, userId, uidNum, chatId, env, api) {
   const textRaw = (msg.text || msg.caption || "").trim();
