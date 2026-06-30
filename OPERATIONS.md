@@ -21,6 +21,19 @@
 | `AUTO_DELETE_MINUTES` | `10` | Durasi auto-delete |
 | `REFERRAL_BONUS` | `3` | Bonus untuk referrer |
 | `REFERRAL_WELCOME` | `3` | Bonus untuk user baru |
+| `GAS_URL` | _(kosong)_ | URL Web App GAS (`https://script.google.com/macros/s/XXX/exec`). Kalau kosong, bot 100% jalan di Redis tanpa Sheets |
+| `GAS_SECRET` | _(kosong)_ | Secret yang sama persis dengan `SHARED_SECRET` di `Code.gs`, mencegah orang lain memanggil endpoint GAS sembarangan |
+
+### Setup Google Apps Script (opsional, untuk arsip & data sekunder)
+
+1. Buka Google Sheets baru → Extensions → Apps Script
+2. Hapus isi default, paste seluruh isi `gas/Code.gs` dari repo ini
+3. Ganti baris pertama: `var SHARED_SECRET = "..."` dengan string acak panjang (contoh: hasil `openssl rand -hex 32`)
+4. Deploy → New deployment → Web app → Execute as: **Me**, Who has access: **Anyone**
+5. Copy URL yang dihasilkan (`.../exec`) → set sebagai `GAS_URL` di Vercel
+6. Set `GAS_SECRET` di Vercel dengan nilai yang sama persis dengan langkah 3
+
+**Arsitektur hybrid:** Redis tetap jadi sumber kebenaran utama untuk semua pengecekan real-time (block/mute/kuota saat user kirim menfess, session & queue anon chat). GAS Sheets menerima salinan paralel (fire-and-forget) setiap kali ada perubahan data — kalau GAS down/lambat, bot tetap berjalan normal karena tidak menunggu respons GAS.
 
 ### Set webhook (sekali setelah deploy)
 
@@ -51,7 +64,9 @@ https://api.telegram.org/botTOKEN/getWebhookInfo
 | `.listf` | Daftar keyword blacklist |
 | `.bc (pesan)` | Broadcast ke semua user |
 | `.stats` | Statistik bot |
-| `.flushqueue` | Bersihkan antrian pencarian (gunakan kalau ada bug "chat not found") |
+| `.queue` | Lihat jumlah antrian, status searching, dan sesi chat aktif — cek ini SEBELUM `.flushqueue` |
+| `.flushqueue` | Bersihkan antrian pencarian (gunakan kalau ada bug "chat not found"). Sesi chat aktif TIDAK ikut terhapus |
+| `.resetdb` | Reset database total (semua data dihapus). Wajib ketik `.resetdb confirm` untuk eksekusi. Gunakan saat update kode besar |
 
 ---
 
@@ -59,7 +74,14 @@ https://api.telegram.org/botTOKEN/getWebhookInfo
 
 ### "chat not found" saat /find
 Data stale di queue Redis dari versi lama.
-**Fix:** Ketik `.flushqueue` sebagai admin, user `/find` ulang.
+**Fix:** Cek dulu dengan `.queue` untuk lihat berapa banyak antrian dan sesi aktif. Kalau aman (tidak ada sesi aktif yang ikut kena), ketik `.flushqueue`, lalu user `/find` ulang.
+
+### Update kode besar / migrasi versi
+Kalau struktur data Redis berubah signifikan dan butuh database benar-benar kosong:
+1. Ketik `.resetdb` — bot akan tampilkan ringkasan data yang akan terhapus
+2. Kalau yakin, ketik `.resetdb confirm`
+3. Semua data (user, sesi, blokir, mute, kuota, referral) akan terhapus total
+4. Bot otomatis siap dipakai dari nol setelah user `/start` ulang
 
 ### Bot tidak merespons sama sekali
 1. Cek `getWebhookInfo` — `last_error_message` harus kosong
@@ -71,6 +93,15 @@ Bot harus jadi **Admin** di channel dengan izin **Post Messages**.
 
 ### Admin reply tidak sampai ke user
 Admin harus **reply** (balas) pesan yang diteruskan bot — bukan kirim pesan baru.
+
+### Data tidak muncul di Google Sheets
+Cek di Vercel Functions logs untuk pesan `sync failed` (contoh: `shBlock sync failed: ...`). Itu artinya panggilan ke GAS gagal tapi **bot tetap jalan normal** (data tetap valid di Redis). Penyebab umum:
+- `GAS_URL` atau `GAS_SECRET` salah/belum di-set
+- Deployment GAS belum di-set "Anyone" pada Who has access
+- `SHARED_SECRET` di `Code.gs` tidak sama dengan `GAS_SECRET` di Vercel
+
+### Reset hanya Redis, tapi data Sheets ikut ke-reset?
+**Tidak.** `.resetdb` hanya menjalankan `FLUSHDB` di Redis — data di Google Sheets (`gas/Code.gs`) tidak ikut terhapus karena terpisah sepenuhnya. Kalau mau hapus data Sheets juga, lakukan manual lewat spreadsheet.
 
 ---
 
@@ -91,6 +122,8 @@ Semua 26 test harus pass sebelum deploy.
 | `user:{id}` | Profil anon chat user |
 | `session:{id}` | Sesi anon chat aktif (TTL 24h) |
 | `queue` | Antrian pencarian partner |
+| `ac_searching_set` | SET user ID yang sedang status searching |
+| `ac_chatting_set` | SET user ID yang sedang status chatting (2 entry per pasangan) |
 | `done:{update_id}` | Idempotency (TTL 1h) |
 | `mf_user:{id}` | Registrasi user menfess |
 | `mf_users_list` | SET semua user ID |

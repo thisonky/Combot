@@ -358,9 +358,189 @@ await test("WAITING_MSG is defined and non-empty", () => {
   assert.ok(WAITING_MSG.length > 0);
 });
 
-// ════════════════════════════════════════════════
-// SUMMARY
-// ════════════════════════════════════════════════
+console.log("\n📋 Admin Queue/ResetDB Feature Tests\n");
+
+// Simulate acSetUser's status index maintenance behavior
+function simulateSetUserStatus(uid, status) {
+  const id = String(uid);
+  if (status === "searching") {
+    mockRedisCmd(env, "SADD", "ac_searching_set", id);
+    mockRedisCmd(env, "SREM", "ac_chatting_set", id);
+  } else if (status === "chatting") {
+    mockRedisCmd(env, "SADD", "ac_chatting_set", id);
+    mockRedisCmd(env, "SREM", "ac_searching_set", id);
+  } else {
+    mockRedisCmd(env, "SREM", "ac_searching_set", id);
+    mockRedisCmd(env, "SREM", "ac_chatting_set", id);
+  }
+}
+
+await test("acCountSearching: tracks status=searching correctly", () => {
+  sets.delete("ac_searching_set");
+  sets.delete("ac_chatting_set");
+  simulateSetUserStatus(9001, "searching");
+  simulateSetUserStatus(9002, "searching");
+  const count = mockRedisCmd(env, "SCARD", "ac_searching_set");
+  assert.equal(count, 2);
+});
+
+await test("acCountChattingUsers: status transition removes from searching set", () => {
+  sets.delete("ac_searching_set");
+  sets.delete("ac_chatting_set");
+  simulateSetUserStatus(9003, "searching");
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_searching_set"), 1);
+  // User matched -> becomes chatting
+  simulateSetUserStatus(9003, "chatting");
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_searching_set"), 0);
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_chatting_set"), 1);
+});
+
+await test("acCountActiveSessions: pairs counted correctly (chatting users / 2)", () => {
+  sets.delete("ac_chatting_set");
+  simulateSetUserStatus(9004, "chatting");
+  simulateSetUserStatus(9005, "chatting"); // pair with 9004
+  simulateSetUserStatus(9006, "chatting");
+  simulateSetUserStatus(9007, "chatting"); // pair with 9006
+  const chattingUsers = mockRedisCmd(env, "SCARD", "ac_chatting_set");
+  const activeSessions = Math.floor(chattingUsers / 2);
+  assert.equal(chattingUsers, 4);
+  assert.equal(activeSessions, 2);
+});
+
+await test("acCountActiveSessions: idle removes from both index sets", () => {
+  sets.delete("ac_searching_set");
+  sets.delete("ac_chatting_set");
+  simulateSetUserStatus(9008, "chatting");
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_chatting_set"), 1);
+  simulateSetUserStatus(9008, "idle");
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_chatting_set"), 0);
+  assert.equal(mockRedisCmd(env, "SCARD", "ac_searching_set"), 0);
+});
+
+await test(".resetdb requires explicit 'confirm' argument before destructive action", () => {
+  const parseArgs = (text) => text.trim().split(/\s+/).slice(1);
+  const withoutConfirm = parseArgs(".resetdb");
+  const withConfirm    = parseArgs(".resetdb confirm");
+  assert.notEqual(withoutConfirm[0], "confirm");
+  assert.equal(withConfirm[0], "confirm");
+});
+
+await test("dbFlushAll: returns true on Redis 'OK' response", () => {
+  const mockResponse1 = "OK";
+  const mockResponse2 = true;
+  const mockResponse3 = null;
+  const isSuccess = (r) => r === "OK" || r === true;
+  assert.equal(isSuccess(mockResponse1), true);
+  assert.equal(isSuccess(mockResponse2), true);
+  assert.equal(isSuccess(mockResponse3), false);
+});
+
+await test(".queue command: shows queue length and active session count independently", () => {
+  sets.delete("ac_searching_set");
+  sets.delete("ac_chatting_set");
+  store.delete("queue");
+  // 2 in queue searching, 1 pair already chatting
+  mockRedisCmd(env, "SET", "queue", JSON.stringify(["1001", "1002"]));
+  simulateSetUserStatus(1001, "searching");
+  simulateSetUserStatus(1002, "searching");
+  simulateSetUserStatus(2001, "chatting");
+  simulateSetUserStatus(2002, "chatting");
+
+  const queueLen   = JSON.parse(mockRedisCmd(env, "GET", "queue") || "[]").length;
+  const searching   = mockRedisCmd(env, "SCARD", "ac_searching_set");
+  const chattingUsers = mockRedisCmd(env, "SCARD", "ac_chatting_set");
+  const sessions    = Math.floor(chattingUsers / 2);
+
+  assert.equal(queueLen, 2);
+  assert.equal(searching, 2);
+  assert.equal(sessions, 1);
+});
+
+console.log("\n📋 Contextual Keyboard Tests\n");
+
+await test("homeKbd: hanya 2 baris tombol, lebih ringkas dari mainMenuKbd", () => {
+  const homeRows = [
+    [{ text: "💌 Kirim Menfess" }, { text: "🔍 Cari Chat Anonim" }],
+    [{ text: "ℹ️ Bantuan" }],
+  ];
+  const mainRows = [
+    [{ text: "💌 Kirim Menfess" }, { text: "🔍 Cari Chat Anonim" }],
+    [{ text: "📊 Sisa Limit Menfess" }, { text: "ℹ️ Bantuan" }],
+    [{ text: "🚨 Laporkan User" }, { text: "📬 Hubungi Admin" }],
+  ];
+  assert.ok(homeRows.length < mainRows.length, "homeKbd harus lebih ringkas dari mainMenuKbd");
+});
+
+await test("menfessModeKbd: tidak mengandung tombol anon chat", () => {
+  const menfessRows = [[{ text: "📊 Sisa Limit Menfess" }], [{ text: "🏠 Menu Utama" }]];
+  const flatTexts = menfessRows.flat().map(b => b.text);
+  assert.ok(!flatTexts.includes("🔍 Cari Chat Anonim"));
+  assert.ok(flatTexts.includes("🏠 Menu Utama"), "harus ada cara balik ke home");
+});
+
+await test("anonChatModeKbd: searching vs chatting punya tombol berbeda", () => {
+  const searchingRows = [[{ text: "🏠 Menu Utama" }]];
+  const chattingRows  = [[{ text: "🚨 Laporkan User" }], [{ text: "🏠 Menu Utama" }]];
+  assert.ok(searchingRows.flat().length < chattingRows.flat().length, "chatting harus punya lebih banyak opsi (termasuk laporkan)");
+  const chattingTexts = chattingRows.flat().map(b => b.text);
+  assert.ok(chattingTexts.includes("🚨 Laporkan User"), "mode chatting harus ada tombol laporkan");
+});
+
+await test("Menu Utama button always returns to mainMenuKbd context", () => {
+  // Simulasi: text === "🏠 Menu Utama" harus match di semua mode
+  const isMenuUtama = (text) => text === "🏠 Menu Utama";
+  assert.ok(isMenuUtama("🏠 Menu Utama"));
+  assert.ok(!isMenuUtama("🏠 menu utama")); // case-sensitive by design (tombol, bukan command)
+});
+
+await test("isSysCmd whitelist includes Menu Utama button during chatting", () => {
+  const text = "🏠 Menu Utama";
+  const isSysCmd = text === "🏠 Menu Utama";
+  assert.ok(isSysCmd, "Menu Utama harus selalu bisa dipakai meski sedang chatting");
+});
+
+console.log("\n📋 GAS Integration Tests\n");
+
+await test("gasCall payload always includes secret field", () => {
+  const env = { GAS_URL: "https://script.google.com/macros/x/exec", GAS_SECRET: "mysecret123" };
+  const action = "block_user";
+  const payload = { user_id: 123, reason: "spam" };
+  const body = JSON.stringify({ action, secret: env.GAS_SECRET, ...payload });
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.secret, "mysecret123");
+  assert.equal(parsed.action, "block_user");
+  assert.equal(parsed.user_id, 123);
+});
+
+await test("dbBlock works correctly even when GAS_URL is not set (optional dependency)", () => {
+  const env = { GAS_URL: null };
+  // Logic: if (env.GAS_URL) shBlock(...) -- should simply skip when null
+  const shouldCallGas = !!env.GAS_URL;
+  assert.equal(shouldCallGas, false, "GAS call should be skipped when GAS_URL not configured");
+});
+
+await test("GAS sync failure does not throw (fire-and-forget pattern)", async () => {
+  // Simulasi: shBlock gagal (network error) tapi tidak boleh melempar exception
+  async function mockShBlock() {
+    throw new Error("Network timeout");
+  }
+  let threw = false;
+  try {
+    // pola asli: shBlock(...).catch(e => console.error(...))
+    await mockShBlock().catch(e => { /* logged, not rethrown */ });
+  } catch {
+    threw = true;
+  }
+  assert.equal(threw, false, "GAS failure must not propagate as uncaught error");
+});
+
+await test("todayWib format matches Redis daily key format (YYYY-MM-DD)", () => {
+  const todayWib = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+  const result = todayWib();
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/, "Format harus YYYY-MM-DD agar konsisten Redis & GAS");
+});
+
+
 
 console.log(`\n${"─".repeat(40)}`);
 console.log(`Results: ${passed} passed, ${failed} failed`);

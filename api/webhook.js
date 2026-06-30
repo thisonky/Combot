@@ -6,7 +6,7 @@ import { tg, ikbd, btn, burl } from "./_tg.js";
 import {
   acGetUser, acSetUser, acGetSession, acDelSession, acSetSession,
   acGetQueue, acAddToQueue, acRemoveFromQueue, acPickPartner,
-  acIsDone, acMarkDone,
+  acIsDone, acMarkDone, acCountSearching, acCountActiveSessions,
   dbRegisterUser, dbCountUsers, dbAllUserIds,
   dbIsBlocked, dbBlock, dbUnblock, dbListBlocked, dbCountBlocked,
   dbIsMuted, dbMute, dbUnmute, dbCountMuted,
@@ -16,6 +16,7 @@ import {
   dbSavePending, dbGetPending, dbDeletePending,
   dbGetReferralBonus, dbAddReferralBonus, dbUseReferralBonus,
   dbHasUsedReferral, dbRecordReferral, dbCountReferrals,
+  dbFlushAll,
 } from "./_db.js";
 
 const NEXT_COOLDOWN  = 5000;   // ms
@@ -40,6 +41,9 @@ function getEnv() {
     AUTO_DEL_MIN: Number(process.env.AUTO_DELETE_MINUTES || 10),
     REF_BONUS:    Number(process.env.REFERRAL_BONUS || 3),
     REF_WELCOME:  Number(process.env.REFERRAL_WELCOME || 3),
+    // GAS_URL opsional — kalau tidak di-set, bot tetap jalan murni di Redis
+    GAS_URL:      process.env.GAS_URL || null,
+    GAS_SECRET:   process.env.GAS_SECRET || "",
   };
 
   const missing = REQUIRED_ENV.filter(k => !process.env[k]);
@@ -82,6 +86,41 @@ function mainMenuKbd(isAdmin) {
   ];
   if (isAdmin) rows.push([{ text: "📊 Stats" }, { text: "🧾 Command Admin" }]);
   return { keyboard: rows, resize_keyboard: true, input_field_placeholder: "Pilih fitur atau ketik mfs!..." };
+}
+
+// Keyboard saat /start pertama kali — placeholder netral, belum tau mode apa-apa.
+// Tetap minim tombol agar tidak penuh, command manual tetap berfungsi kapan saja.
+function homeKbd(isAdmin) {
+  const rows = [
+    [{ text: "💌 Kirim Menfess" }, { text: "🔍 Cari Chat Anonim" }],
+    [{ text: "ℹ️ Bantuan" }],
+  ];
+  if (isAdmin) rows.push([{ text: "📊 Stats" }, { text: "🧾 Command Admin" }]);
+  return { keyboard: rows, resize_keyboard: true, input_field_placeholder: "Ketik /start untuk menu lengkap..." };
+}
+
+// Keyboard muncul otomatis saat user sedang di mode menfess (preview/sebelum kirim)
+function menfessModeKbd() {
+  return {
+    keyboard: [
+      [{ text: "📊 Sisa Limit Menfess" }],
+      [{ text: "🏠 Menu Utama" }],
+    ],
+    resize_keyboard: true,
+    input_field_placeholder: "Ketik mfs! + pesanmu...",
+  };
+}
+
+// Keyboard muncul otomatis saat user sedang searching/chatting di anon chat
+function anonChatModeKbd(isChatting) {
+  const rows = isChatting
+    ? [[{ text: "🚨 Laporkan User" }], [{ text: "🏠 Menu Utama" }]]
+    : [[{ text: "🏠 Menu Utama" }]]; // saat searching, cuma tombol balik ke home
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+    input_field_placeholder: isChatting ? "Ketik pesan, atau /next /stop..." : "Mencari partner... /stop untuk batal",
+  };
 }
 
 // Reusable waiting-for-partner message (was copy-pasted 3x before)
@@ -225,6 +264,7 @@ async function handleMyChatMember(update, env, api) {
         tgRaw(env.BOT_TOKEN, "sendMessage", {
           chat_id: Number(session.partnerId),
           text: "👋 Partner keluar dari sesi.\nMau cari yang baru? /find 😊",
+          reply_markup: mainMenuKbd(false),
         }).catch(() => {});
       }
       if (acUser) await acSetUser(env, String(userId), { ...acUser, status: "idle" });
@@ -310,6 +350,7 @@ async function handleMessage(msg, env, api) {
       text === "💌 Kirim Menfess"      || text === "🔍 Cari Chat Anonim" ||
       text === "📊 Sisa Limit Menfess" || text === "ℹ️ Bantuan" ||
       text === "📊 Stats"              || text === "🧾 Command Admin" ||
+      text === "🏠 Menu Utama"         ||
       (text.startsWith(".") && uidNum === env.ADMIN_ID) ||
       textLow.startsWith("mfs!");
 
@@ -335,6 +376,15 @@ async function handleMessage(msg, env, api) {
         "_Contoh:_ `mfs! Hai semua 😳`\n\n" +
         "Bisa kirim teks, foto, video, atau voice note.\n" +
         `📊 Kuota: *${env.DAILY_MAX}x/hari* — bisa nambah lewat referral 🎁`,
+      reply_markup: menfessModeKbd(),
+    });
+  }
+
+  if (text === "🏠 Menu Utama") {
+    return api.send({
+      chat_id: chatId,
+      text: "🏠 Kembali ke menu utama. Mau ngapain?",
+      reply_markup: mainMenuKbd(uidNum === env.ADMIN_ID),
     });
   }
 
@@ -446,8 +496,8 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
     return api.send({ chat_id: chatId, text: "⚠️ Ketik /start untuk mendaftar terlebih dahulu." });
   }
   if (!fromInternal) {
-    if (user.status === "chatting")  return api.send({ chat_id: chatId, text: "💬 Kamu lagi ngobrol nih!\n/next — ganti partner · /stop — keluar" });
-    if (user.status === "searching") return api.send({ chat_id: chatId, text: "🔍 Masih nyariin partner, sabar ya 😄\n/stop — batalkan" });
+    if (user.status === "chatting")  return api.send({ chat_id: chatId, text: "💬 Kamu lagi ngobrol nih!\n/next — ganti partner · /stop — keluar", reply_markup: anonChatModeKbd(true) });
+    if (user.status === "searching") return api.send({ chat_id: chatId, text: "🔍 Masih nyariin partner, sabar ya 😄\n/stop — batalkan", reply_markup: anonChatModeKbd(false) });
   }
 
   await acSetUser(env, userId, { ...user, status: "searching" });
@@ -456,7 +506,7 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
   // Try to find a valid partner, skipping stale entries
   const partnerId = await pickValidPartner(env, userId);
   if (!partnerId) {
-    return api.send({ chat_id: chatId, text: WAITING_MSG });
+    return api.send({ chat_id: chatId, text: WAITING_MSG, reply_markup: anonChatModeKbd(false) });
   }
 
   const partnerUser = await acGetUser(env, partnerId);
@@ -465,11 +515,11 @@ async function handleFind(userId, chatId, env, api, fromInternal) {
     await acRemoveFromQueue(env, partnerId);
     // One retry with cleaned queue
     const nextId = await pickValidPartner(env, userId);
-    if (!nextId) return api.send({ chat_id: chatId, text: WAITING_MSG });
+    if (!nextId) return api.send({ chat_id: chatId, text: WAITING_MSG, reply_markup: anonChatModeKbd(false) });
     const nextUser = await acGetUser(env, nextId);
     if (!nextUser || nextUser.status !== "searching") {
       await acRemoveFromQueue(env, nextId);
-      return api.send({ chat_id: chatId, text: WAITING_MSG });
+      return api.send({ chat_id: chatId, text: WAITING_MSG, reply_markup: anonChatModeKbd(false) });
     }
     return matchPair(env, api, userId, user, nextId, nextUser, chatId);
   }
@@ -502,8 +552,8 @@ async function matchPair(env, api, userId, user, partnerId, partnerUser, chatId)
     "Kamu terhubung secara anonim. Mulai ngobrol! 🤫\n\n" +
     "⏭ /next — ganti partner · 🛑 /stop — keluar";
 
-  await api.send({ chat_id: Number(userId),    text: connMsg });
-  await api.send({ chat_id: Number(partnerId), text: connMsg });
+  await api.send({ chat_id: Number(userId),    text: connMsg, reply_markup: anonChatModeKbd(true) });
+  await api.send({ chat_id: Number(partnerId), text: connMsg, reply_markup: anonChatModeKbd(true) });
 }
 
 async function handleNext(userId, chatId, env, api) {
@@ -520,7 +570,7 @@ async function handleNext(userId, chatId, env, api) {
   if (session) {
     const pid   = String(session.partnerId);
     const pData = await acGetUser(env, pid);
-    api.send({ chat_id: Number(pid), text: "👋 Partner cabut, lagi cari yang baru.\nMau cari juga? /find 😊" }).catch(() => {});
+    api.send({ chat_id: Number(pid), text: "👋 Partner cabut, lagi cari yang baru.\nMau cari juga? /find 😊", reply_markup: mainMenuKbd(false) }).catch(() => {});
     if (pData) await acSetUser(env, pid, { ...pData, status: "idle" });
     await acDelSession(env, pid);
     await acDelSession(env, userId);
@@ -545,7 +595,7 @@ async function handleStop(userId, chatId, env, api) {
   if (session) {
     const pid   = String(session.partnerId);
     const pData = await acGetUser(env, pid);
-    api.send({ chat_id: Number(pid), text: "👋 Partner keluar dari sesi.\nMau cari yang baru? /find 😊" }).catch(() => {});
+    api.send({ chat_id: Number(pid), text: "👋 Partner keluar dari sesi.\nMau cari yang baru? /find 😊", reply_markup: mainMenuKbd(false) }).catch(() => {});
     if (pData) await acSetUser(env, pid, { ...pData, status: "idle" });
     await acDelSession(env, pid);
     await acDelSession(env, userId);
@@ -832,7 +882,7 @@ async function handleAdminStats(chatId, env, api) {
 }
 
 async function handleAdminHelp(chatId, api) {
-  return api.send({ chat_id: chatId, text: "🧾 *Command Admin*\n━━━━━━━━━━━━━━━\n`.bl (id) (alasan)` — Blokir user\n`.unbl (id)` — Unblock user\n`.listbl` — Daftar user diblokir\n`.mute (id) (durasi) (h|d)` — Mute sementara\n`.unmute (id)` — Cabut mute\n`.reset (id)` — Reset limit harian\n`.addf (kata)` — Tambah kata terlarang\n`.delf (kata)` — Hapus kata terlarang\n`.listf` — Daftar keyword blacklist\n`.bc (pesan)` — Broadcast ke semua user\n`.stats` — Statistik bot\n`.flushqueue` — Bersihkan antrian pencarian" });
+  return api.send({ chat_id: chatId, text: "🧾 *Command Admin*\n━━━━━━━━━━━━━━━\n`.bl (id) (alasan)` — Blokir user\n`.unbl (id)` — Unblock user\n`.listbl` — Daftar user diblokir\n`.mute (id) (durasi) (h|d)` — Mute sementara\n`.unmute (id)` — Cabut mute\n`.reset (id)` — Reset limit harian\n`.addf (kata)` — Tambah kata terlarang\n`.delf (kata)` — Hapus kata terlarang\n`.listf` — Daftar keyword blacklist\n`.bc (pesan)` — Broadcast ke semua user\n`.stats` — Statistik bot\n`.queue` — Lihat status antrian & sesi chat aktif\n`.flushqueue` — Bersihkan antrian pencarian\n`.resetdb` — Reset database total (perlu konfirmasi)" });
 }
 
 async function handleAdminCmd(text, chatId, env, api) {
@@ -930,10 +980,50 @@ async function handleAdminCmd(text, chatId, env, api) {
 
   if (cmd === ".stats")      return handleAdminStats(chatId, env, api);
 
+  if (cmd === ".queue") {
+    const [q, searching, activeSessions] = await Promise.all([
+      acGetQueue(env),
+      acCountSearching(env),
+      acCountActiveSessions(env),
+    ]);
+    return s(
+      `📋 *Status Antrian Anonymous Chat*\n━━━━━━━━━━━━━━━\n` +
+      `🔍 Dalam antrian (queue): *${q.length}*\n` +
+      `⏳ Status searching: *${searching}*\n` +
+      `💬 Sesi chat aktif: *${activeSessions} pasangan*\n\n` +
+      (q.length > 0
+        ? `_Kalau mau bersihkan antrian, ketik \`.flushqueue\`. Sesi chat yang sedang aktif TIDAK ikut terhapus._`
+        : `_Antrian kosong, aman untuk \`.flushqueue\` kalau perlu._`)
+    );
+  }
+
   if (cmd === ".flushqueue") {
     const q = await acGetQueue(env);
     await redisRaw(env, "DEL", "queue");
     return s(`✅ Queue dibersihkan. ${q.length} entri dihapus.`);
+  }
+
+  if (cmd === ".resetdb") {
+    // Destruktif total — wajib konfirmasi eksplisit agar tidak kepencet tidak sengaja
+    if (args[0] !== "confirm") {
+      const [totalUsers, activeSessions, q] = await Promise.all([
+        dbCountUsers(env), acCountActiveSessions(env), acGetQueue(env),
+      ]);
+      return s(
+        `⚠️ *PERINGATAN: Reset Database Total*\n━━━━━━━━━━━━━━━\n` +
+        `Ini akan MENGHAPUS SEMUA DATA:\n` +
+        `• ${totalUsers} user menfess terdaftar\n` +
+        `• ${activeSessions} sesi chat aktif\n` +
+        `• ${q.length} antrian pencarian\n` +
+        `• Semua blokir, mute, keyword blacklist, kuota, referral\n\n` +
+        `Tindakan ini *TIDAK BISA DIBATALKAN*.\n\n` +
+        `Kalau yakin, ketik:\n\`.resetdb confirm\``
+      );
+    }
+    const success = await dbFlushAll(env);
+    return s(success
+      ? "✅ Database berhasil di-reset total. Semua data kosong, bot siap dipakai ulang dari nol."
+      : "❌ Reset gagal — cek koneksi Redis atau permission FLUSHDB di Upstash.");
   }
 }
 
