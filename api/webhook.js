@@ -449,7 +449,8 @@ async function handleMessage(msg, env, api) {
 // ════════════════════════════════════════════════════════════════
 
 async function handleStart(msg, userId, uidNum, chatId, text, env, api) {
-  await dbRegisterUser(env, uidNum);
+  const username = msg.from.username || "";
+  await dbRegisterUser(env, uidNum, "", username);
 
   const arg = text.split(" ")[1] || "";
   if (arg.startsWith("ref_")) {
@@ -1093,6 +1094,9 @@ async function handleCallback(query, env, api) {
     const existing = await acGetUser(env, userId);
     const gender   = data === "gender_male" ? "male" : "female";
     await acSetUser(env, userId, { gender, status: existing?.status || "idle", lastNext: existing?.lastNext || 0 });
+    // Sync ulang ke GAS Sheets dengan gender yang baru dipilih
+    const username = query.from.username || "";
+    await dbRegisterUser(env, uidNum, gender, username);
     const label = gender === "male" ? "👨 Laki-laki" : "👩 Perempuan";
     return api.send({
       chat_id: chatId,
